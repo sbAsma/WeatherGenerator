@@ -28,6 +28,7 @@ from weathergen.model.layers import MLP
 from weathergen.model.utils import ActivationFactory
 from weathergen.utils.utils import get_dtype
 
+from weathergen.model.norms import BatchNormBlock
 
 class EmbeddingEngine(torch.nn.Module):
     name: "EmbeddingEngine"
@@ -43,6 +44,8 @@ class EmbeddingEngine(torch.nn.Module):
         self.cf = cf
         self.sources_size = sources_size  # KCT:iss130, what is this?
         self.embeds = torch.nn.ModuleList()
+        # Add separate BatchNorm modules for CAMS streams
+        self.batch_norms = torch.nn.ModuleList()
 
         for i, si in enumerate(self.cf.streams):
             stream_name = si.get("name", i)
@@ -69,6 +72,13 @@ class EmbeddingEngine(torch.nn.Module):
                         stream_name=stream_name,
                     )
                 )
+                # Add BatchNorm for CAMS streams
+                if "CAMS" in stream_name:
+                    print(f"Applying BatchNormBlock to CAMS stream: {stream_name}")
+                    self.batch_norms.append(BatchNormBlock(self.cf.ae_local_dim_embed))
+                else:
+                    self.batch_norms.append(torch.nn.Identity())
+                    
             elif si["embed"]["net"] == "linear":
                 self.embeds.append(
                     StreamEmbedLinear(
@@ -77,6 +87,7 @@ class EmbeddingEngine(torch.nn.Module):
                         stream_name=stream_name,
                     )
                 )
+                self.batch_norms.append(torch.nn.Identity())
             else:
                 raise ValueError("Unsupported embedding network type")
 
@@ -99,26 +110,17 @@ class EmbeddingEngine(torch.nn.Module):
         )
 
         for _, sb in enumerate(streams_data):
-            for _, (s, embed) in enumerate(zip(sb, self.embeds, strict=False)):
+            for _, (s, embed, bn) in enumerate(zip(sb, self.embeds, self.batch_norms, strict=False)):
                 if not s.source_empty():
                     idxs = s.source_idxs_embed.to(device)
                     idxs_pe = s.source_idxs_embed_pe.to(device)
 
                     # create full scatter index
-                    # (there's no broadcasting which is likely highly inefficient)
                     idxs = idxs.unsqueeze(1).repeat((1, self.cf.ae_local_dim_embed))
                     x_embed = embed(s.source_tokens_cells, s.source_centroids).flatten(0, 1)
-                    # there's undocumented limitation in flash_attn that will make embed fail if
-                    # #tokens is too large; code below is a work around
-                    # x_embed = torch.cat(
-                    #     [
-                    #         embed(s_c, c_c).flatten(0, 1)
-                    #         for s_c, c_c in zip(
-                    #             torch.split(s.source_tokens_cells, 49152),
-                    #             torch.split(s.source_centroids, 49152),
-                    #         )
-                    #     ]
-                    # )
+                    
+                    # Apply BatchNorm if it's not Identity
+                    x_embed = bn(x_embed)
 
                     # scatter write to reorder from per stream to per cell ordering
                     tokens_all.scatter_(0, idxs, x_embed + pe_embed[idxs_pe])
