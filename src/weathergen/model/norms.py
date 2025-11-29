@@ -171,3 +171,39 @@ class SaturateEncodings(nn.Module):
 
     def forward(self, x):
         return x / torch.sqrt(1 + (x**2 / self.scale_factor_squared))
+
+class BatchNormBlock(nn.Module):
+    """
+    Simple BatchNorm block for normalizing embeddings and intermediate representations.
+    """
+    
+    def __init__(self, num_features: int):
+        """
+        Initialize BatchNorm block.
+        
+        Args:
+            num_features (int): Number of features/channels to normalize
+        """
+        super().__init__()
+        self.bn = nn.BatchNorm1d(num_features)
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass through BatchNorm.
+        
+        Args:
+            x (torch.Tensor): Input tensor of shape (batch, features) or (batch, seq_len, features)
+            
+        Returns:
+            torch.Tensor: Normalized tensor
+        """
+        # Handle 3D tensors by reshaping for BatchNorm1d
+        if x.dim() == 3:
+            batch_size, seq_len, features = x.shape
+            x = x.view(batch_size * seq_len, features)
+            x = self.bn(x)
+            x = x.view(batch_size, seq_len, features)
+        else:
+            x = self.bn(x)
+        
+        return x
