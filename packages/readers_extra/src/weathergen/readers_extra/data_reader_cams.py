@@ -2,6 +2,8 @@ import json
 import logging
 from pathlib import Path
 from typing import override
+from numpy.typing import NDArray
+
 
 import numpy as np
 import xarray as xr
@@ -14,6 +16,11 @@ from weathergen.datasets.data_reader_base import (
     TIndex,
     check_reader_data,
 )
+
+type DType = np.float32  # The type for the data in the datasets.
+
+log_epsilon = np.log(1e-4)
+
 
 ############################################################################
 
@@ -281,3 +288,90 @@ class DataReaderCams(DataReaderTimestep):
         )
         check_reader_data(rd, dtr)
         return rd
+
+    @staticmethod
+    @override
+    def _normalize(
+        data: NDArray[DType],
+        idx: list[int],
+        mean: dict[int, float],
+        stdev: dict[int, float],
+        name: str,
+    ) -> NDArray[DType]:
+        """
+        Helper function to normalize data using logarithmic normalization.
+        
+        Applies: x = (log(max(x, 1e-4)) - log(1e-4)) / log(1e-4)
+
+        Parameters
+        ----------
+        data :
+            data to be normalized
+        idx :
+            indices of channels to be normalized
+        mean :
+            mean values for channels (unused in log normalization)
+        stdev :
+            standard deviation values for channels (unused in log normalization)
+        name :
+            name of the data (for error messages)
+
+        Returns
+        -------
+        Normalized data
+        """
+        if data.shape[-1] != len(idx):
+            raise ValueError(
+                f"incorrect number of {name} channels: expected {len(idx)}, got {data.shape[-1]}"
+            )
+        
+        
+        for i, ch in enumerate(idx):
+            # Ensure values are at least 1e-4 to avoid log(0)
+            clipped_data = np.maximum(data[..., i], 1e-4)
+            data[..., i] = (np.log(clipped_data) - log_epsilon) / log_epsilon
+
+        return data
+
+    @staticmethod
+    @override
+    def _denormalize(
+        data: NDArray[DType],
+        idx: list[int],
+        mean: dict[int, float],
+        stdev: dict[int, float],
+        name: str,
+    ) -> NDArray[DType]:
+        """
+        Helper function to denormalize data using inverse logarithmic normalization.
+        
+        Applies inverse of: x = (log(max(x, 1e-4)) - log(1e-4)) / log(1e-4)
+        Which is: x = exp(normalized * log(1e-4) + log(1e-4)) = exp(normalized * log(1e-4)) * 1e-4
+
+        Parameters
+        ----------
+        data :
+            data to be denormalized
+        idx :
+            indices of channels to be denormalized
+        mean :
+            mean values for channels (unused in log normalization)
+        stdev :
+            standard deviation values for channels (unused in log normalization)
+        name :
+            name of the data (for error messages)
+
+        Returns
+        -------
+        Denormalized data
+        """
+        if data.shape[-1] != len(idx):
+            raise ValueError(
+                f"incorrect number of {name} channels: expected {len(idx)}, got {data.shape[-1]}"
+            )
+                
+        for i, ch in enumerate(idx):
+            # Inverse transformation: exp(normalized * log(1e-4) + log(1e-4))
+            data[..., i] = np.exp(data[..., i] * log_epsilon + log_epsilon)
+
+        return data

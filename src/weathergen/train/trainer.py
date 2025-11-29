@@ -605,6 +605,16 @@ class Trainer(TrainerBase):
             ):
                 output = self.model(self.model_params, batch, cf.forecast_offset, forecast_steps)
             targets = {"physical": batch[0]}
+            
+            # Extract tensor data for debugging - get target_tokens from StreamData objects
+            target_tensors = []
+            for stream_list in batch[0]:
+                for stream_data in stream_list:
+                    all_tokens = torch.cat([token.flatten() for token in stream_data.target_tokens])
+                    min_val = all_tokens.min()
+                    max_val = all_tokens.max()
+                    print(f"min(target): {min_val}, max(target): {max_val}")
+
             loss, loss_values = self.loss_calculator.compute_loss(
                 preds=output,
                 targets=targets,
