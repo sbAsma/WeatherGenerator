@@ -1,4 +1,3 @@
-streams_directory:  "./config/streams/cams/"
+streams_directory:  "./config/streams/cams_era5/"
 start_date: 200301010000
 num_mini_epochs: 44
-# FE_with_LayerNorm: False
