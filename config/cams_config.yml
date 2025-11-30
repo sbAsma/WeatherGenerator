@@ -1,4 +1,4 @@
-streams_directory:  "./config/streams/cams_era5/"
+streams_directory:  "./config/streams/cams/"
 start_date: 200301010000
 # num_mini_epochs: 44
 
@@ -9,7 +9,7 @@ forecast_offset: 1
 forecast_steps: 4
 forecast_policy: fixed
 forecast_freeze_model: false
-fe_num_blocks: 4
+fe_num_blocks: 8
 fe_layer_norm_after_blocks: []
 training_mode: forecast
 samples_per_epoch: 4096
@@ -18,5 +18,5 @@ lr_final_decay: 2e-6
 lr_steps_warmup: 256
 num_epochs: 44
 
-# len_hrs: 3
-# step_hrs: 3
+len_hrs: 3
+step_hrs: 3
