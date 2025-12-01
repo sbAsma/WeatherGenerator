@@ -42,6 +42,7 @@ from weathergen.model.attention import (
     MultiSelfAttentionHeadLocal,
     MultiSelfAttentionHeadVarlen,
 )
+from weathergen.model.norms import BatchNormBlock
 from weathergen.model.ema import EMAModel
 from weathergen.model.layers import MLP
 from weathergen.model.model import Model, ModelParams
@@ -152,6 +153,7 @@ class Trainer(TrainerBase):
                 MultiCrossAttentionHeadVarlen,
                 MultiCrossAttentionHeadVarlenSlicedQ,
                 MultiSelfAttentionHeadVarlen,
+                BatchNormBlock,
             )
 
             for module in model.ae_local_engine.ae_local_blocks.modules():
