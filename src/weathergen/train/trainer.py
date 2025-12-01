@@ -42,7 +42,6 @@ from weathergen.model.attention import (
     MultiSelfAttentionHeadLocal,
     MultiSelfAttentionHeadVarlen,
 )
-from weathergen.model.norms import BatchNormBlock
 from weathergen.model.ema import EMAModel
 from weathergen.model.layers import MLP
 from weathergen.model.model import Model, ModelParams
@@ -153,7 +152,6 @@ class Trainer(TrainerBase):
                 MultiCrossAttentionHeadVarlen,
                 MultiCrossAttentionHeadVarlenSlicedQ,
                 MultiSelfAttentionHeadVarlen,
-                BatchNormBlock,
             )
 
             for module in model.ae_local_engine.ae_local_blocks.modules():
@@ -886,11 +884,18 @@ class Trainer(TrainerBase):
         if self.cf.with_ddp and self.cf.with_fsdp:
             cpu_state_dict = {}
             for param_name, sharded_param in maybe_sharded_sd.items():
-                full_param = sharded_param.full_tensor()
-                if is_root():
-                    cpu_state_dict[param_name] = full_param.cpu()
+                # Check if parameter is a DTensor (distributed) or regular tensor
+                if hasattr(sharded_param, 'full_tensor'):
+                    # DTensor - needs full_tensor() to gather from all ranks
+                    full_param = sharded_param.full_tensor()
+                    if is_root():
+                        cpu_state_dict[param_name] = full_param.cpu()
+                    else:
+                        del full_param
                 else:
-                    del full_param
+                    # Regular tensor (e.g., BatchNorm parameters) - already complete
+                    if is_root():
+                        cpu_state_dict[param_name] = sharded_param.cpu()
             return cpu_state_dict
         else:
             return maybe_sharded_sd
