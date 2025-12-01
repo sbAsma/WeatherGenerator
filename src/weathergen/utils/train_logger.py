@@ -199,12 +199,12 @@ class TrainLogger:
         cols_train = ["dtime", "samples", "mse", "lr"]
         cols1 = [_weathergen_timestamp, "num_samples", "loss_avg_mean", "learning_rate"]
         for si in cf.streams:
-            for lf in cf.loss_fcts:
+            for lf in cf.training_mode_config.losses.LossPhysical.loss_fcts:
                 cols1 += [_key_loss(si["name"], lf[0])]
                 cols_train += [
                     si["name"].replace(",", "").replace("/", "_").replace(" ", "_") + ", " + lf[0]
                 ]
-        with_stddev = [("stats" in lf) for lf in cf.loss_fcts]
+        with_stddev = [("stats" in lf) for lf in cf.training_mode_config.losses.LossPhysical.loss_fcts]
         if with_stddev:
             for si in cf.streams:
                 cols1 += [_key_stddev(si["name"])]
@@ -257,12 +257,12 @@ class TrainLogger:
         cols_val = ["dtime", "samples"]
         cols2 = [_weathergen_timestamp, "num_samples"]
         for si in cf.streams:
-            for lf in cf.loss_fcts_val:
+            for lf in cf.validation_mode_config.losses.LossPhysical.loss_fcts:
                 cols_val += [
                     si["name"].replace(",", "").replace("/", "_").replace(" ", "_") + ", " + lf[0]
                 ]
                 cols2 += [_key_loss(si["name"], lf[0])]
-        with_stddev = [("stats" in lf) for lf in cf.loss_fcts_val]
+        with_stddev = [("stats" in lf) for lf in cf.validation_mode_config.losses.LossPhysical.loss_fcts]
         if with_stddev:
             for si in cf.streams:
                 cols2 += [_key_stddev(si["name"])]
@@ -436,14 +436,14 @@ def clean_name(s: str) -> str:
 
 def _key_loss(st_name: str, lf_name: str) -> str:
     st_name = clean_name(st_name)
-    return f"stream.{st_name}.loss_{lf_name}.loss_avg"
+    return f"loss.LossPhysical.{st_name}.{lf_name}.loss_avg"
 
 
 def _key_loss_chn(st_name: str, lf_name: str, ch_name: str) -> str:
     st_name = clean_name(st_name)
-    return f"stream.{st_name}.loss_{lf_name}.loss_{ch_name}"
+    return f"loss.LossPhysical.{st_name}.{lf_name}.loss_{ch_name}"
 
 
 def _key_stddev(st_name: str) -> str:
     st_name = clean_name(st_name)
-    return f"stream.{st_name}.stddev_avg"
+    return f"loss.LossPhysical.{st_name}.mse.stddev_avg"
