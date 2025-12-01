@@ -1,4 +1,4 @@
-streams_directory:  "./config/streams/cams_era5/"
+streams_directory:  "./config/streams/cams/"
 start_date: 200301010000
 
 ae_local_num_blocks: 0
