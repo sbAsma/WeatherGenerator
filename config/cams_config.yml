@@ -1,6 +1,5 @@
 streams_directory:  "./config/streams/cams/"
 start_date: 200301010000
-# num_mini_epochs: 44
 
 ae_local_num_blocks: 0
 ae_global_num_blocks: 4
@@ -16,7 +15,6 @@ samples_per_epoch: 4096
 lr_max: 0.0001
 lr_final_decay: 2e-6
 lr_steps_warmup: 256
-num_epochs: 44
 
 len_hrs: 3
 step_hrs: 3
