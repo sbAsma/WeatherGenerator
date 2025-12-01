@@ -76,8 +76,8 @@ class EmbeddingEngine(torch.nn.Module):
                 if "CAMS" in stream_name:
                     print(f"Applying BatchNormBlock to CAMS stream: {stream_name}")
                     self.batch_norms.append(BatchNormBlock(self.cf.ae_local_dim_embed))
-                else:
-                    self.batch_norms.append(torch.nn.Identity())
+                # else:
+                #     self.batch_norms.append(torch.nn.Identity())
                     
             elif si["embed"]["net"] == "linear":
                 self.embeds.append(
