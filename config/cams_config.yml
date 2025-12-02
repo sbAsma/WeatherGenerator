@@ -18,3 +18,5 @@ lr_steps_warmup: 256
 
 len_hrs: 3
 step_hrs: 3
+
+num_epochs: 32
