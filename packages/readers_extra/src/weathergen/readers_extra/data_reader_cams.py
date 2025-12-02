@@ -299,37 +299,22 @@ class DataReaderCams(DataReaderTimestep):
         name: str,
     ) -> NDArray[DType]:
         """
-        Helper function to normalize data using logarithmic normalization.
-        
-        Applies: x = (log(max(x, 1e-4)) - log(1e-4)) / log(1e-4)
-
-        Parameters
-        ----------
-        data :
-            data to be normalized
-        idx :
-            indices of channels to be normalized
-        mean :
-            mean values for channels (unused in log normalization)
-        stdev :
-            standard deviation values for channels (unused in log normalization)
-        name :
-            name of the data (for error messages)
-
-        Returns
-        -------
-        Normalized data
+        Two-step normalization: z-score then logarithmic
         """
         if data.shape[-1] != len(idx):
             raise ValueError(
                 f"incorrect number of {name} channels: expected {len(idx)}, got {data.shape[-1]}"
             )
         
-        
         for i, ch in enumerate(idx):
-            # Ensure values are at least 1e-4 to avoid log(0)
-            clipped_data = np.maximum(data[..., i], 1e-4)
-            data[..., i] = (np.log(clipped_data) - log_epsilon) / log_epsilon
+            # Step 1: Z-score normalization
+            z_normalized = (data[..., i] - mean[ch]) / stdev[ch]
+            
+            # Step 2: Shift to positive range and apply log normalization
+            # Shift by adding a constant to ensure positive values
+            shifted_data = z_normalized + 0.0  # Adjust shift as needed
+            clipped_data = np.maximum(z_normalized, 1e-4)
+            data[..., i] = (np.log(clipped_data) - np.log(1e-4)) / np.log(1e-4)
 
         return data
 
@@ -343,35 +328,19 @@ class DataReaderCams(DataReaderTimestep):
         name: str,
     ) -> NDArray[DType]:
         """
-        Helper function to denormalize data using inverse logarithmic normalization.
-        
-        Applies inverse of: x = (log(max(x, 1e-4)) - log(1e-4)) / log(1e-4)
-        Which is: x = exp(normalized * log(1e-4) + log(1e-4)) = exp(normalized * log(1e-4)) * 1e-4
-
-        Parameters
-        ----------
-        data :
-            data to be denormalized
-        idx :
-            indices of channels to be denormalized
-        mean :
-            mean values for channels (unused in log normalization)
-        stdev :
-            standard deviation values for channels (unused in log normalization)
-        name :
-            name of the data (for error messages)
-
-        Returns
-        -------
-        Denormalized data
+        Reverse two-step normalization
         """
         if data.shape[-1] != len(idx):
             raise ValueError(
                 f"incorrect number of {name} channels: expected {len(idx)}, got {data.shape[-1]}"
             )
-                
+        
         for i, ch in enumerate(idx):
-            # Inverse transformation: exp(normalized * log(1e-4) + log(1e-4))
-            data[..., i] = np.exp(data[..., i] * log_epsilon + log_epsilon)
+            # Step 1: Reverse log normalization
+            exp_data = np.exp(data[..., i] * np.log(1e-4) + np.log(1e-4))
+            
+            # Step 2: Remove shift and reverse z-score
+            z_normalized = exp_data - 0.0  # Remove the shift
+            data[..., i] = z_normalized * stdev[ch] + mean[ch]
 
         return data
