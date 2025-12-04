@@ -19,7 +19,8 @@ from weathergen.datasets.data_reader_base import (
 
 type DType = np.float32  # The type for the data in the datasets.
 
-log_epsilon = np.log(1e-4)
+epsilon = 1e-35
+log_epsilon = np.log(epsilon)
 
 
 ############################################################################
@@ -299,7 +300,7 @@ class DataReaderCams(DataReaderTimestep):
         name: str,
     ) -> NDArray[DType]:
         """
-        Two-step normalization: z-score then logarithmic
+        Logarithmic normalization only
         """
         if data.shape[-1] != len(idx):
             raise ValueError(
@@ -307,14 +308,10 @@ class DataReaderCams(DataReaderTimestep):
             )
         
         for i, ch in enumerate(idx):
-            # Step 1: Z-score normalization
-            z_normalized = (data[..., i] - mean[ch]) / stdev[ch]
-            
-            # Step 2: Shift to positive range and apply log normalization
-            # Shift by adding a constant to ensure positive values
-            shifted_data = z_normalized + 0.0  # Adjust shift as needed
-            clipped_data = np.maximum(z_normalized, 1e-4)
-            data[..., i] = (np.log(clipped_data) - np.log(1e-4)) / np.log(1e-4)
+            # Ensure positive values by clipping to minimum threshold
+            clipped_data = np.maximum(data[..., i], epsilon)
+            # Apply logarithmic transformation
+            data[..., i] = (np.log(clipped_data) - log_epsilon)/log_epsilon
 
         return data
 
@@ -328,7 +325,7 @@ class DataReaderCams(DataReaderTimestep):
         name: str,
     ) -> NDArray[DType]:
         """
-        Reverse two-step normalization
+        Reverse logarithmic normalization
         """
         if data.shape[-1] != len(idx):
             raise ValueError(
@@ -336,11 +333,7 @@ class DataReaderCams(DataReaderTimestep):
             )
         
         for i, ch in enumerate(idx):
-            # Step 1: Reverse log normalization
-            exp_data = np.exp(data[..., i] * np.log(1e-4) + np.log(1e-4))
-            
-            # Step 2: Remove shift and reverse z-score
-            z_normalized = exp_data - 0.0  # Remove the shift
-            data[..., i] = z_normalized * stdev[ch] + mean[ch]
+            # Reverse logarithmic transformation
+            data[..., i] = np.exp(data[..., i] * log_epsilon + log_epsilon)
 
         return data
