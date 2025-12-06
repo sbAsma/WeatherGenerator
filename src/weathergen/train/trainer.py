@@ -884,6 +884,7 @@ class Trainer(TrainerBase):
         if self.cf.with_ddp and self.cf.with_fsdp:
             cpu_state_dict = {}
             for param_name, sharded_param in maybe_sharded_sd.items():
+                print(f"Processing parameter: {param_name}")
                 full_param = sharded_param.full_tensor()
                 if is_root():
                     cpu_state_dict[param_name] = full_param.cpu()
