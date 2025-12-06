@@ -2,6 +2,8 @@ import json
 import logging
 from pathlib import Path
 from typing import override
+from numpy.typing import NDArray
+
 
 import numpy as np
 import xarray as xr
@@ -14,6 +16,12 @@ from weathergen.datasets.data_reader_base import (
     TIndex,
     check_reader_data,
 )
+
+type DType = np.float32  # The type for the data in the datasets.
+
+epsilon = 1e-35
+log_epsilon = np.log(epsilon)
+
 
 ############################################################################
 
@@ -281,3 +289,51 @@ class DataReaderCams(DataReaderTimestep):
         )
         check_reader_data(rd, dtr)
         return rd
+
+    @staticmethod
+    @override
+    def _normalize(
+        data: NDArray[DType],
+        idx: list[int],
+        mean: dict[int, float],
+        stdev: dict[int, float],
+        name: str,
+    ) -> NDArray[DType]:
+        """
+        Logarithmic normalization only
+        """
+        if data.shape[-1] != len(idx):
+            raise ValueError(
+                f"incorrect number of {name} channels: expected {len(idx)}, got {data.shape[-1]}"
+            )
+        
+        for i, ch in enumerate(idx):
+            # Ensure positive values by clipping to minimum threshold
+            clipped_data = np.maximum(data[..., i], epsilon)
+            # Apply logarithmic transformation
+            data[..., i] = (np.log(clipped_data) - log_epsilon)/log_epsilon
+
+        return data
+
+    @staticmethod
+    @override
+    def _denormalize(
+        data: NDArray[DType],
+        idx: list[int],
+        mean: dict[int, float],
+        stdev: dict[int, float],
+        name: str,
+    ) -> NDArray[DType]:
+        """
+        Reverse logarithmic normalization
+        """
+        if data.shape[-1] != len(idx):
+            raise ValueError(
+                f"incorrect number of {name} channels: expected {len(idx)}, got {data.shape[-1]}"
+            )
+        
+        for i, ch in enumerate(idx):
+            # Reverse logarithmic transformation
+            data[..., i] = np.exp(data[..., i] * log_epsilon + log_epsilon)
+
+        return data
