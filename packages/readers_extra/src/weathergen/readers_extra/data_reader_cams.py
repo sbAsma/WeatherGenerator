@@ -3,7 +3,7 @@ import logging
 from pathlib import Path
 from typing import override
 from numpy.typing import NDArray
-
+import torch
 
 import numpy as np
 import xarray as xr
@@ -334,6 +334,10 @@ class DataReaderCams(DataReaderTimestep):
         
         for i, ch in enumerate(idx):
             # Reverse logarithmic transformation
-            data[..., i] = np.exp(data[..., i] * log_epsilon + log_epsilon)
+            # Keep tensor operations on the same device
+            if torch.is_tensor(data):
+                data[..., i] = torch.exp(data[..., i] * log_epsilon + log_epsilon)
+            else:
+                data[..., i] = np.exp(data[..., i] * log_epsilon + log_epsilon)
 
         return data
