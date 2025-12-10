@@ -145,11 +145,12 @@ class DataReaderCams(DataReaderTimestep):
         ch_list_loop = ch_list if ch_list else self.colnames
         for ch in ch_list_loop:
             if ch not in channels_exclude:
-                ch_parts = ch.split("_")
+                # ch_parts = ch.split("_")
                 # Only include channels that are either surface variables or valid pressure
                 # level variables
-                if len(ch_parts) != 2 or ch_parts[1] in self.levels:
-                    new_colnames.append(ch)
+                # if len(ch_parts) != 2 or ch_parts[1] in self.levels:
+                # Asma: Removed this because it is currently too complicated to adjust
+                new_colnames.append(ch)
 
         mask = [c in new_colnames for c in self.colnames]
         selected_cols_idx = self.cols_idx[np.where(mask)]
