@@ -359,7 +359,7 @@ class Trainer(TrainerBase):
 
         # lr is updated after each batch so account for this
         # TODO: conf should be read-only, do not modify the conf in flight
-        cf.lr_steps = int((len(self.dataset) * cf.num_mini_epochs) / cf.batch_size_per_gpu)
+        cf.lr_steps = int((len(self.dataset) * cf.num_epochs) / cf.batch_size_per_gpu)
 
         steps_decay = cf.lr_steps - cf.lr_steps_warmup - cf.lr_steps_cooldown
         if is_root():
@@ -434,18 +434,18 @@ class Trainer(TrainerBase):
         if cf.val_initial:
             self.validate(-1)
 
-        for mini_epoch in range(mini_epoch_base, cf.num_mini_epochs):
-            logger.info(f"Mini_epoch {mini_epoch} of {cf.num_mini_epochs}: train.")
+        for mini_epoch in range(mini_epoch_base, cf.num_epochs):
+            logger.info(f"Mini_epoch {mini_epoch} of {cf.num_epochs}: train.")
             self.train(mini_epoch)
 
-            logger.info(f"Mini_epoch {mini_epoch} of {cf.num_mini_epochs}: validate.")
+            logger.info(f"Mini_epoch {mini_epoch} of {cf.num_epochs}: validate.")
             self.validate(mini_epoch)
 
-            logger.info(f"Mini_epoch {mini_epoch} of {cf.num_mini_epochs}: save_model.")
+            logger.info(f"Mini_epoch {mini_epoch} of {cf.num_epochs}: save_model.")
             self.save_model(mini_epoch)
 
         # log final model
-        self.save_model(cf.num_mini_epochs)
+        self.save_model(cf.num_epochs)
 
     ###########################################
     def _prepare_logging(
@@ -889,7 +889,6 @@ class Trainer(TrainerBase):
         if self.cf.with_ddp and self.cf.with_fsdp:
             cpu_state_dict = {}
             for param_name, sharded_param in maybe_sharded_sd.items():
-                print(f"Processing parameter: {param_name}")
                 full_param = sharded_param.full_tensor()
                 if is_root():
                     cpu_state_dict[param_name] = full_param.cpu()
@@ -931,7 +930,7 @@ class Trainer(TrainerBase):
 
     def save_model(self, mini_epoch: int, name=None):
         # Saving at mini_epoch == max_mini_epoch means that we are saving the latest checkpoint.
-        max_mini_epoch = self.cf.num_mini_epochs
+        max_mini_epoch = self.cf.num_epochs
         assert mini_epoch <= max_mini_epoch, (mini_epoch, max_mini_epoch)
         model_state_dict = self._get_full_model_state_dict()
 
