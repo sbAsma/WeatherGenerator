@@ -552,7 +552,7 @@ class Plotter:
                         "map",
                         self.run_id,
                         tag,
-                        str(sa),
+                        # str(sa),
                         "*",
                         self.stream,
                         var,
