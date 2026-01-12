@@ -48,6 +48,80 @@ def get_next_data(fstep, da_preds, da_tars, fsteps):
     return preds_next, tars_next
 
 
+def _compute_pooled_r2(da_preds, da_tars, bbox, region, ensemble):
+    """
+    Compute pooled R² by concatenating all predictions and targets across forecast steps.
+    
+    Parameters
+    ----------
+    da_preds : dict
+        Dictionary of prediction arrays by forecast step
+    da_tars : dict
+        Dictionary of target arrays by forecast step
+    bbox : RegionBoundingBox
+        Bounding box for the region
+    region : str
+        Region name
+    ensemble : list
+        List of ensemble members
+        
+    Returns
+    -------
+    xr.DataArray
+        Pooled R² values with dimensions for channel, sample, and ensemble
+    """
+    all_preds = []
+    all_tars = []
+    
+    # Collect all predictions and targets across forecast steps
+    for (fstep, tars), (_, preds) in zip(da_tars.items(), da_preds.items(), strict=False):
+        if preds.ipoint.size == 0:
+            continue
+            
+        # Apply regional mask if not global
+        if region != "global":
+            tars = bbox.apply_mask(tars)
+            preds = bbox.apply_mask(preds)
+            
+        if tars is not None and preds is not None:
+            all_preds.append(preds)
+            all_tars.append(tars)
+    
+    if not all_preds:
+        # Return NaN array with proper dimensions
+        return xr.DataArray(
+            np.full((len(da_preds[list(da_preds.keys())[0]].sample), 
+                    len(da_preds[list(da_preds.keys())[0]].channel), 
+                    len(ensemble)), np.nan),
+            dims=["sample", "channel", "ens"],
+            coords={
+                "sample": da_preds[list(da_preds.keys())[0]].sample,
+                "channel": da_preds[list(da_preds.keys())[0]].channel,
+                "ens": ensemble,
+            }
+        )
+    
+    # Concatenate along forecast_step dimension
+    pooled_preds = xr.concat(all_preds, dim="forecast_step")
+    pooled_tars = xr.concat(all_tars, dim="forecast_step")
+    
+    # Create VerifiedData for pooled calculation
+    pooled_data = VerifiedData(pooled_preds, pooled_tars, None, None, None)
+    
+    # Calculate R² aggregating over both ipoint and forecast_step dimensions
+    pooled_r2 = get_score(
+        pooled_data,
+        "r2",
+        agg_dims=["ipoint", "forecast_step"]
+    )
+    
+    # Ensure proper dimension structure
+    for coord in ["channel", "sample", "ens"]:
+        pooled_r2 = scalar_coord_to_dim(pooled_r2, coord)
+    
+    return pooled_r2.compute()
+
+
 def calc_scores_per_stream(
     reader: Reader,
     scores_dict: dict,
@@ -208,6 +282,23 @@ def calc_scores_per_stream(
                 )
 
         _logger.info(f"Scores for run {reader.run_id} - {stream} calculated successfully.")
+        
+        # Compute pooled R² across all forecast steps and samples
+        if "r2" in metrics:
+            _logger.info(f"Computing pooled R² for run {reader.run_id} - {stream} - {region}...")
+            pooled_r2 = _compute_pooled_r2(da_preds, da_tars, bbox, region, ensemble)
+            _logger.info(f"Pooled R² computed: mean = {float(pooled_r2.mean()):.4f}, "
+                        f"min = {float(pooled_r2.min()):.4f}, max = {float(pooled_r2.max()):.4f}")
+            
+            # Store pooled R² in scores_dict with special key
+            pooled_key = f"r2_pooled"
+            if pooled_key not in scores_dict:
+                scores_dict[pooled_key] = {}
+            if region not in scores_dict[pooled_key]:
+                scores_dict[pooled_key][region] = {}
+            if stream not in scores_dict[pooled_key][region]:
+                scores_dict[pooled_key][region][stream] = {}
+            scores_dict[pooled_key][region][stream][reader.run_id] = pooled_r2
 
         metric_list_to_json(
             reader,
