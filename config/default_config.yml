@@ -156,3 +156,9 @@ train_log_freq:
   terminal: 10
   metrics: 20
   checkpoint: 250
+
+training_mode_config: {"losses": {LossPhysical: {weight: 1.0, loss_fcts: [['mse', 1.0]]},}
+                        }
+                    
+validation_mode_config: {"losses": {LossPhysical: {weight: 1.0, loss_fcts: [['mse', 1.0]]},}
+                        }

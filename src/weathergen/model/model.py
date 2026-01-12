@@ -22,6 +22,8 @@ import torch.nn as nn
 from astropy_healpix import healpy
 from torch.utils.checkpoint import checkpoint
 
+from pathlib import Path
+
 from weathergen.common.config import Config
 from weathergen.model.engines import (
     EmbeddingEngine,
