@@ -411,6 +411,8 @@ class Trainer(TrainerBase):
         # recover mini_epoch when continuing run
         if self.world_size_original is None:
             mini_epoch_base = int(self.cf.istep / len(self.data_loader))
+        elif mini_epoch_contd >= 0:
+            mini_epoch_base = mini_epoch_contd
         else:
             len_per_rank = (
                 len(self.dataset) // (self.world_size_original * cf.batch_size_per_gpu)
@@ -828,8 +830,8 @@ class Trainer(TrainerBase):
 
         is_model_sharded = self.cf.with_ddp and self.cf.with_fsdp
         if is_model_sharded:
-            params = self.model.rename_old_state_dict(params=params)  # For backward compatibility
-            meta_sharded_sd = self.model.state_dict()
+            params = model.rename_old_state_dict(params=params)  # For backward compatibility
+            meta_sharded_sd = model.state_dict()
             maybe_sharded_sd = {}
             for param_name, full_tensor in params.items():
                 sharded_meta_param = meta_sharded_sd.get(param_name)
