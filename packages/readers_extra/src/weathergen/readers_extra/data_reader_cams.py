@@ -61,7 +61,7 @@ class DataReaderCams(DataReaderTimestep):
         self.cols_idx = np.array(list(np.arange(len(self.colnames))))
 
         # Load associated statistics file for normalization
-        stats_filename = Path(filename).with_name(Path(filename).stem + "_stats.json")
+        stats_filename = Path(filename).with_name(Path(filename).stem + "_log_norm_stats.json")
         with open(stats_filename) as stats_file:
             self.stats = json.load(stats_file)
 
@@ -301,7 +301,7 @@ class DataReaderCams(DataReaderTimestep):
         name: str,
     ) -> NDArray[DType]:
         """
-        Logarithmic normalization only
+        Logarithmic normalization followed by z-normalization
         """
         if data.shape[-1] != len(idx):
             raise ValueError(
@@ -313,6 +313,8 @@ class DataReaderCams(DataReaderTimestep):
             clipped_data = np.maximum(data[..., i], epsilon)
             # Apply logarithmic transformation
             data[..., i] = (np.log(clipped_data) - log_epsilon)/log_epsilon
+            # Apply z-normalization on top of log-norm
+            data[..., i] = (data[..., i] - mean[ch]) / stdev[ch]
 
         return data
 
@@ -326,7 +328,7 @@ class DataReaderCams(DataReaderTimestep):
         name: str,
     ) -> NDArray[DType]:
         """
-        Reverse logarithmic normalization
+        Reverse z-normalization followed by reverse logarithmic normalization
         """
         if data.shape[-1] != len(idx):
             raise ValueError(
@@ -334,6 +336,8 @@ class DataReaderCams(DataReaderTimestep):
             )
         
         for i, ch in enumerate(idx):
+            # Reverse z-normalization first
+            data[..., i] = (data[..., i] * stdev[ch]) + mean[ch]
             # Reverse logarithmic transformation
             # Keep tensor operations on the same device
             if torch.is_tensor(data):
