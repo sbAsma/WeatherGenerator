@@ -263,12 +263,12 @@ class Trainer(TrainerBase):
         self.loss_calculator_val = LossCalculator(cf=cf, stage=VAL, device=self.devices[0])
 
         if is_root():
-            config.save(self.cf, epoch=0)
+            config.save(self.cf, mini_epoch=0)
 
         logger.info(f"Starting inference with id={self.cf.run_id}.")
 
         # inference validation set
-        self.validate(epoch=0)
+        self.validate(mini_epoch=0)
         logger.info(f"Finished inference run with id: {cf.run_id}")
 
     def run(self, cf, devices, run_id_contd=None, mini_epoch_contd=None):
@@ -359,7 +359,7 @@ class Trainer(TrainerBase):
 
         # lr is updated after each batch so account for this
         # TODO: conf should be read-only, do not modify the conf in flight
-        cf.lr_steps = int((len(self.dataset) * cf.num_mini_epochs) / cf.batch_size_per_gpu)
+        cf.lr_steps = int((len(self.dataset) * cf.num_epochs) / cf.batch_size_per_gpu)
 
         steps_decay = cf.lr_steps - cf.lr_steps_warmup - cf.lr_steps_cooldown
         if is_root():
@@ -411,6 +411,8 @@ class Trainer(TrainerBase):
         # recover mini_epoch when continuing run
         if self.world_size_original is None:
             mini_epoch_base = int(self.cf.istep / len(self.data_loader))
+        # elif mini_epoch_contd >= 0:
+        #     mini_epoch_base = mini_epoch_contd
         else:
             len_per_rank = (
                 len(self.dataset) // (self.world_size_original * cf.batch_size_per_gpu)
@@ -434,18 +436,18 @@ class Trainer(TrainerBase):
         if cf.val_initial:
             self.validate(-1)
 
-        for mini_epoch in range(mini_epoch_base, cf.num_mini_epochs):
-            logger.info(f"Mini_epoch {mini_epoch} of {cf.num_mini_epochs}: train.")
+        for mini_epoch in range(mini_epoch_base, cf.num_epochs):
+            logger.info(f"Mini_epoch {mini_epoch} of {cf.num_epochs}: train.")
             self.train(mini_epoch)
 
-            logger.info(f"Mini_epoch {mini_epoch} of {cf.num_mini_epochs}: validate.")
+            logger.info(f"Mini_epoch {mini_epoch} of {cf.num_epochs}: validate.")
             self.validate(mini_epoch)
 
-            logger.info(f"Mini_epoch {mini_epoch} of {cf.num_mini_epochs}: save_model.")
+            logger.info(f"Mini_epoch {mini_epoch} of {cf.num_epochs}: save_model.")
             self.save_model(mini_epoch)
 
         # log final model
-        self.save_model(cf.num_mini_epochs)
+        self.save_model(cf.num_epochs)
 
     ###########################################
     def _prepare_logging(
@@ -546,11 +548,11 @@ class Trainer(TrainerBase):
 
         # TODO: iterate over batches here in future, and change loop order to batch, stream, fstep
         for fstep in range(len(targets_rt)):
-            if len(preds[fstep]) == 0:
+            if len(preds.physical[fstep]) == 0:
                 continue
 
             for i_strm, target in enumerate(targets_rt[fstep]):
-                pred = preds[fstep][i_strm]
+                pred = preds.physical[fstep][i_strm]
 
                 if not (target.shape[0] > 0 and pred.shape[0] > 0):
                     continue
@@ -593,6 +595,7 @@ class Trainer(TrainerBase):
 
         # Unweighted loss, real weighted loss, std for losses that need it
         self.loss_unweighted_hist, self.loss_model_hist, self.stdev_unweighted_hist = [], [], []
+        self.last_grad_norm = 0.0
 
         # training loop
         self.t_start = time.time()
@@ -606,20 +609,19 @@ class Trainer(TrainerBase):
                 dtype=self.mixed_precision_dtype,
                 enabled=cf.with_mixed_precision,
             ):
-                preds, posteriors = self.model(
-                    self.model_params, batch, cf.forecast_offset, forecast_steps
-                )
-            loss_values = self.loss_calculator.compute_loss(
-                preds=preds,
-                streams_data=batch[0],
+                output = self.model(self.model_params, batch, cf.forecast_offset, forecast_steps)
+            targets = {"physical": batch[0]}
+            loss, loss_values = self.loss_calculator.compute_loss(
+                preds=output,
+                targets=targets,
             )
             if cf.latent_noise_kl_weight > 0.0:
-                kl = torch.cat([posterior.kl() for posterior in posteriors])
-                loss_values.loss += cf.latent_noise_kl_weight * kl.mean()
+                kl = torch.cat([posterior.kl() for posterior in output.latent])
+                loss += cf.latent_noise_kl_weight * kl.mean()
 
             # backward pass
             self.optimizer.zero_grad()
-            self.grad_scaler.scale(loss_values.loss).backward()
+            self.grad_scaler.scale(loss).backward()
             # loss_values.loss.backward()
 
             # gradient clipping
@@ -650,9 +652,25 @@ class Trainer(TrainerBase):
                     self.world_size_original * self.cf.batch_size_per_gpu,
                 )
 
-            self.loss_unweighted_hist += [loss_values.losses_all]
-            self.loss_model_hist += [loss_values.loss.item()]
-            self.stdev_unweighted_hist += [loss_values.stddev_all]
+            # Collecting loss statistics for later inspection
+            if bidx == 0:
+                self.loss_unweighted_hist = {
+                    loss_name: []
+                    for _, calc_terms in loss_values.loss_terms.items()
+                    for loss_name in calc_terms.losses_all.keys()
+                }
+                self.stdev_unweighted_hist = {
+                    loss_name: []
+                    for _, calc_terms in loss_values.loss_terms.items()
+                    for loss_name in calc_terms.stddev_all.keys()
+                }
+                self.loss_model_hist = []
+            for _, loss_terms in loss_values.loss_terms.items():
+                for loss_name, losses_all in loss_terms.losses_all.items():
+                    self.loss_unweighted_hist[loss_name].append(losses_all)
+                for loss_name, stddev_all in loss_terms.stddev_all.items():
+                    self.stdev_unweighted_hist[loss_name].append(stddev_all)
+            self.loss_model_hist += [loss.item()]
 
             perf_gpu, perf_mem = self.get_perf()
             self.perf_gpu = ddp_average(torch.tensor([perf_gpu], device=self.device)).item()
@@ -661,6 +679,17 @@ class Trainer(TrainerBase):
             self._log_terminal(bidx, mini_epoch, TRAIN)
             if bidx % self.train_log_freq.metrics == 0:
                 self._log(TRAIN)
+                self.loss_unweighted_hist = {
+                    loss_name: []
+                    for _, calc_terms in loss_values.loss_terms.items()
+                    for loss_name in calc_terms.losses_all.keys()
+                }
+                self.stdev_unweighted_hist = {
+                    loss_name: []
+                    for _, calc_terms in loss_values.loss_terms.items()
+                    for loss_name in calc_terms.stddev_all.keys()
+                }
+                self.loss_model_hist = []
 
             # save model checkpoint (with designation _latest)
             if bidx % self.train_log_freq.checkpoint == 0 and bidx > 0:
@@ -675,7 +704,6 @@ class Trainer(TrainerBase):
         self.model.eval()
 
         dataset_val_iter = iter(self.data_loader_validation)
-        self.loss_unweighted_hist, self.loss_model_hist, self.stdev_unweighted_hist = [], [], []
 
         with torch.no_grad():
             # print progress bar but only in interactive mode, i.e. when without ddp
@@ -697,19 +725,21 @@ class Trainer(TrainerBase):
                             if self.ema_model is None
                             else self.ema_model.forward_eval
                         )
-                        preds, _ = model_forward(
+                        output = model_forward(
                             self.model_params, batch, cf.forecast_offset, forecast_steps
                         )
 
-                    streams_data: list[list[StreamData]] = batch[0]
-                    # compute loss and log output
-                    if bidx < cf.log_validation:
-                        loss_values = self.loss_calculator_val.compute_loss(
-                            preds=preds,
-                            streams_data=streams_data,
-                        )
+                    targets = {"physical": batch[0]}
 
+                    # compute loss
+                    loss, loss_values = self.loss_calculator_val.compute_loss(
+                        preds=output,
+                        targets=targets,
+                    )
+                    # log output
+                    if bidx < cf.log_validation:
                         # TODO: Move _prepare_logging into write_validation by passing streams_data
+                        streams_data: list[list[StreamData]] = batch[0]
                         (
                             preds_all,
                             targets_all,
@@ -717,7 +747,7 @@ class Trainer(TrainerBase):
                             targets_times_all,
                             targets_lens,
                         ) = self._prepare_logging(
-                            preds=preds,
+                            preds=output,
                             forecast_offset=cf.forecast_offset,
                             forecast_steps=cf.forecast_steps,
                             streams_data=streams_data,
@@ -738,15 +768,25 @@ class Trainer(TrainerBase):
                             sample_idxs,
                         )
 
-                    else:
-                        loss_values = self.loss_calculator_val.compute_loss(
-                            preds=preds,
-                            streams_data=streams_data,
-                        )
-
-                    self.loss_unweighted_hist += [loss_values.losses_all]
-                    self.loss_model_hist += [loss_values.loss.item()]
-                    self.stdev_unweighted_hist += [loss_values.stddev_all]
+                    # Collecting loss statistics for later inspection
+                    if bidx == 0:
+                        self.loss_unweighted_hist = {
+                            loss_name: []
+                            for _, calc_terms in loss_values.loss_terms.items()
+                            for loss_name in calc_terms.losses_all.keys()
+                        }
+                        self.stdev_unweighted_hist = {
+                            loss_name: []
+                            for _, calc_terms in loss_values.loss_terms.items()
+                            for loss_name in calc_terms.stddev_all.keys()
+                        }
+                        self.loss_model_hist = []
+                    for _, loss_terms in loss_values.loss_terms.items():
+                        for loss_name, losses_all in loss_terms.losses_all.items():
+                            self.loss_unweighted_hist[loss_name].append(losses_all)
+                        for loss_name, stddev_all in loss_terms.stddev_all.items():
+                            self.stdev_unweighted_hist[loss_name].append(stddev_all)
+                    self.loss_model_hist += [loss.item()]
 
                     pbar.update(self.cf.batch_size_validation_per_gpu)
 
@@ -790,6 +830,7 @@ class Trainer(TrainerBase):
 
         is_model_sharded = self.cf.with_ddp and self.cf.with_fsdp
         if is_model_sharded:
+            params = model.rename_old_state_dict(params=params)  # For backward compatibility
             meta_sharded_sd = model.state_dict()
             maybe_sharded_sd = {}
             for param_name, full_tensor in params.items():
@@ -891,7 +932,7 @@ class Trainer(TrainerBase):
 
     def save_model(self, mini_epoch: int, name=None):
         # Saving at mini_epoch == max_mini_epoch means that we are saving the latest checkpoint.
-        max_mini_epoch = self.cf.num_mini_epochs
+        max_mini_epoch = self.cf.num_epochs
         assert mini_epoch <= max_mini_epoch, (mini_epoch, max_mini_epoch)
         model_state_dict = self._get_full_model_state_dict()
 
@@ -930,6 +971,7 @@ class Trainer(TrainerBase):
             stddev_all (dict[str, torch.Tensor]): Dictionary mapping each stream name to its
                 per-channel standard deviation tensor.
         """
+
         losses_all: dict[str, Tensor] = {}
         stddev_all: dict[str, Tensor] = {}
 
@@ -938,13 +980,12 @@ class Trainer(TrainerBase):
         # Gather all tensors from all ranks into a list and stack them into one tensor again
         real_loss = torch.cat(all_gather_vlen(real_loss))
 
-        for stream in self.cf.streams:  # Loop over all streams
-            stream_hist = [losses_all[stream.name] for losses_all in self.loss_unweighted_hist]
-            stream_all = torch.stack(stream_hist).to(torch.float64)
-            losses_all[stream.name] = torch.cat(all_gather_vlen(stream_all))
-            stream_hist = [stddev_all[stream.name] for stddev_all in self.stdev_unweighted_hist]
-            stream_all = torch.stack(stream_hist).to(torch.float64)
-            stddev_all[stream.name] = torch.cat(all_gather_vlen(stream_all))
+        for loss_name, loss_values in self.loss_unweighted_hist.items():
+            loss_values = torch.stack(loss_values).to(torch.float64)
+            losses_all[loss_name] = torch.cat(all_gather_vlen(loss_values))
+        for stddev_name, stddev_values in self.stdev_unweighted_hist.items():
+            stddev_values = torch.stack(stddev_values).to(torch.float64)
+            stddev_all[stddev_name] = torch.cat(all_gather_vlen(stddev_values))
 
         return real_loss, losses_all, stddev_all
 
@@ -979,8 +1020,6 @@ class Trainer(TrainerBase):
                     self.perf_mem,
                 )
 
-        self.loss_unweighted_hist, self.loss_model_hist, self.stdev_unweighted_hist = [], [], []
-
     def _get_tensor_item(self, tensor):
         """
         When using FSDP2, tensor is a DTensor and we need full_tensor().item() instead of .item(),
@@ -1013,10 +1052,9 @@ class Trainer(TrainerBase):
                         f"""validation ({self.cf.run_id}) : {mini_epoch:03d} : 
                         {avg_loss.nanmean().item()}"""
                     )
-                    for _, st in enumerate(self.cf.streams):
+                    for loss_name, loss_values in losses_all.items():
                         logger.info(
-                            "{}".format(st["name"])
-                            + f" : {losses_all[st['name']].nanmean():0.4E} \t",
+                            f"{loss_name}" + f" : {loss_values.nanmean():0.4E} \t",
                         )
                     logger.info("\n")
 
@@ -1034,10 +1072,9 @@ class Trainer(TrainerBase):
                     pstr += f"s/sec={(print_freq * self.cf.batch_size_per_gpu) / dt:.3f})"
                     logger.info(pstr)
                     logger.info("\t")
-                    for _, st in enumerate(self.cf.streams):
+                    for loss_name, loss_values in losses_all.items():
                         logger.info(
-                            "{}".format(st["name"])
-                            + f" : {losses_all[st['name']].nanmean():0.4E} \t",
+                            f"{loss_name}" + f" : {loss_values.nanmean():0.4E} \t",
                         )
                     logger.info("\n")
 

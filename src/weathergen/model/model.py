@@ -9,6 +9,7 @@
 # granted to it by virtue of its status as an intergovernmental organisation
 # nor does it submit to any jurisdiction.
 
+import dataclasses
 import logging
 import math
 import warnings
@@ -20,6 +21,8 @@ import torch
 import torch.nn as nn
 from astropy_healpix import healpy
 from torch.utils.checkpoint import checkpoint
+
+from pathlib import Path
 
 from weathergen.common.config import Config
 from weathergen.model.engines import (
@@ -39,6 +42,16 @@ from weathergen.utils.distributed import is_root
 from weathergen.utils.utils import get_dtype
 
 logger = logging.getLogger(__name__)
+
+
+@dataclasses.dataclass
+class ModelOutput:
+    """
+    A dataclass to encapsulate the model output and give a clear API.
+    """
+
+    physical: dict[str, torch.Tensor]
+    latent: dict[str, torch.Tensor]
 
 
 class ModelParams(torch.nn.Module):
@@ -548,6 +561,77 @@ class Model(torch.nn.Module):
         return new_params
 
     #########################################
+    def load(self, run_id: str, mini_epoch: str = -1) -> None:
+        """Loads model state from checkpoint and checks for missing and unused keys.
+        Args:
+            run_id : model_id of the trained model
+            mini_epoch : The mini_epoch to load. Default (-1) is the latest mini_epoch
+        """
+
+        path_run = Path(self.cf.model_path) / run_id
+        mini_epoch_id = (
+            f"chkpt{mini_epoch:05d}" if mini_epoch != -1 and mini_epoch is not None else "latest"
+        )
+        filename = f"{run_id}_{mini_epoch_id}.chkpt"
+
+        if not (path_run / filename).exists():
+            mini_epoch_id = f"epoch{mini_epoch:05d}"
+            filename = f"{run_id}_{mini_epoch_id}.chkpt"
+
+        params = torch.load(
+            path_run / filename, map_location=torch.device("cpu"), weights_only=True
+        )
+
+        # Ensure backward compatibility with old model checkpoints
+        params = self.rename_old_state_dict(params)
+
+        params_renamed = {}
+        for k in params.keys():
+            params_renamed[k.replace("module.", "")] = params[k]
+
+        mkeys, ukeys = self.load_state_dict(params_renamed, strict=False)
+        # mkeys, ukeys = self.load_state_dict( params, strict=False)
+
+        if len(mkeys) > 0 and is_root():
+            logger.warning(f"Missing keys when loading model: {mkeys}")
+
+        if len(ukeys) > 0 and is_root():
+            logger.warning(f"Unused keys when loading model: {mkeys}")
+
+    #########################################
+    def forward_jac(self, *args):
+        sources = args[:-1]
+        sources_lens = args[-1]
+        # no-op when satisfied but needed for Jacobian
+        sources_lens = sources_lens.to(torch.int64).cpu()
+
+        preds_all = self.forward(sources, sources_lens)
+
+        return tuple(preds_all[0])
+
+    #########################################
+    def plot_token_distribution(self, tokens, fstep):
+        # When validating (distributed setup), don't plot the token distribution
+        if tokens.dtype == torch.bfloat16:
+            return
+        
+        plot_path = Path(self.cf.run_path, self.cf.run_id, "plots", "ERA5", "latent_hists")
+        import os
+        import matplotlib.pyplot as plt
+
+        fig, ax = plt.subplots()
+        ax.hist(tokens.flatten().to("cpu").numpy(), bins=30)
+        if not hasattr(self, "xlim"):
+            self.xlim = np.array(ax.get_xlim())
+            self.ylim = np.array(ax.get_ylim())
+        ax.set_xlim(0.5 * self.xlim)
+        ax.set_ylim(self.ylim)
+        ax.set_title(f"Forecast step {fstep}")
+        os.makedirs(plot_path, exist_ok=True)
+        fig.savefig(plot_path / f"fstep_{str(fstep).zfill(3)}.png")
+        plt.close()
+
+    #########################################
     def forward(self, model_params: ModelParams, batch, forecast_offset: int, forecast_steps: int):
         """Performs the forward pass of the model to generate forecasts
 
@@ -576,6 +660,9 @@ class Model(torch.nn.Module):
 
         tokens = self.assimilate_global(model_params, tokens)
 
+        if not self.training:
+            self.plot_token_distribution(tokens=tokens, fstep=0)
+
         # roll-out in latent space
         preds_all = []
         for fstep in range(forecast_offset, forecast_offset + forecast_steps):
@@ -598,6 +685,9 @@ class Model(torch.nn.Module):
 
             tokens = self.forecast(model_params, tokens, fstep)
 
+            if not self.training:
+                self.plot_token_distribution(tokens=tokens, fstep=fstep)
+
         # prediction for final step
         preds_all += [
             self.predict(
@@ -609,7 +699,10 @@ class Model(torch.nn.Module):
             )
         ]
 
-        return preds_all, posteriors
+        latents = {}
+        latents["posteriors"] = posteriors
+
+        return ModelOutput(physical=preds_all, latent=latents)
 
     #########################################
     def embed_cells(self, model_params: ModelParams, streams_data) -> torch.Tensor:

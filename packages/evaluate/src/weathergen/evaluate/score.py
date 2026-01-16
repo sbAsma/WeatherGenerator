@@ -182,6 +182,7 @@ class Scores:
             "rmse": self.calc_rmse,
             "vrmse": self.calc_vrmse,
             "bias": self.calc_bias,
+            "r2": self.calc_r2,
             "acc": self.calc_acc,
             "froct": self.calc_froct,
             "troct": self.calc_troct,
@@ -1018,6 +1019,46 @@ class Scores:
         bias = self._mean(p - gt)
 
         return bias
+
+    def calc_r2(self, p: xr.DataArray, gt: xr.DataArray) -> xr.DataArray:
+        """
+        Calculate coefficient of determination (R²) of forecast data w.r.t. reference data.
+        R² = 1 - SS_res / SS_tot, where:
+        - SS_res is the residual sum of squares
+        - SS_tot is the total sum of squares
+
+        Parameters
+        ----------
+        p: xr.DataArray
+            Forecast data array
+        gt: xr.DataArray
+            Ground truth data array
+        Returns
+        -------
+        xr.DataArray
+            Coefficient of determination (R²)
+        """
+        if self._agg_dims is None:
+            raise ValueError(
+                "Cannot calculate R² without aggregation dimensions (agg_dims=None)."
+            )
+
+        # Calculate mean of ground truth over aggregation dimensions
+        gt_mean = self._mean(gt)
+        
+        # Calculate residual sum of squares
+        ss_res = self._sum(np.square(gt - p))
+        
+        # Calculate total sum of squares
+        ss_tot = self._sum(np.square(gt - gt_mean))
+        
+        # Calculate R²
+        r2 = 1 - (ss_res / ss_tot)
+        
+        # Handle case where ss_tot is zero (no variance in ground truth)
+        r2 = r2.where(ss_tot > 0, np.nan)
+        
+        return r2
 
     def calc_psnr(
         self,
