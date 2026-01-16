@@ -411,8 +411,8 @@ class Trainer(TrainerBase):
         # recover mini_epoch when continuing run
         if self.world_size_original is None:
             mini_epoch_base = int(self.cf.istep / len(self.data_loader))
-        elif mini_epoch_contd >= 0:
-            mini_epoch_base = mini_epoch_contd
+        # elif mini_epoch_contd >= 0:
+        #     mini_epoch_base = mini_epoch_contd
         else:
             len_per_rank = (
                 len(self.dataset) // (self.world_size_original * cf.batch_size_per_gpu)
