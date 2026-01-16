@@ -297,12 +297,16 @@ class DataReaderIconEsm(DataReaderTimestep):
         -------
         ReaderData
         """
+        # print(f"[DEBUG] In _get() method of ICON ESM reader", flush=True)
         (t_idxs, dtr) = self._get_dataset_idxs(idx)
         # dtr is a time window object it has the attributes t_start_win and t_end_win
 
+        # print(f"[DEBUG] t_idxs: {t_idxs}, dtr: start={dtr.start}, end={dtr.end}", flush=True)
+        # print(f"[DEBUG] Dataset length: {self.len}", flush=True)
+        # print(f"[DEBUG] len(t_idxs): {len(t_idxs)}", flush=True)
         if self.ds is None or self.len == 0 or len(t_idxs) == 0:
             return ReaderData.empty(
-                num_data_fields=len(channels_idx), num_geo_fields=len(self.geoinfo_idx)
+                num_data_fields=len(channels_idx), num_geo_fields=len(self.geoinfo_idx), dtype=np.float32
             )
 
         # Select channels
@@ -316,6 +320,7 @@ class DataReaderIconEsm(DataReaderTimestep):
             datetimes = []
             coords = []
             for ch in channels:
+                # _logger.info(f"[DEBUG] inside loop, channel {ch} for time slice {start_ts} to {end_ts}")
                 # print(f"{ch}", flush=True)
                 ch_parts = ch.split("_")
                 if len(ch_parts) == 2 :
@@ -338,7 +343,9 @@ class DataReaderIconEsm(DataReaderTimestep):
                         print(f"Channel {ch} with part {ch_parts[1]} not found in dataset. Skipping.", flush=True)
                         continue
                 else:
+                    # print(f"[DEBUG] Loading channel {ch} for time slice {start_ts} to {end_ts}", flush=True)
                     da = self.ds[ch].sel(time=slice(start_ts, end_ts))
+                    # print(f"[DEBUG] Loaded data array for channel {ch}: {da}", flush=True)
                 data_arr = da.compute(scheduler="synchronous")
 
                 # else:
@@ -357,19 +364,19 @@ class DataReaderIconEsm(DataReaderTimestep):
 
                     # coords
                     n_times = len(data_arr.time)
-                    lat = np.tile(data_arr.latitude.values[:, np.newaxis], (n_times, 1))
-                    lon = np.tile(data_arr.longitude.values[:, np.newaxis], (n_times, 1))
+                    lat = np.tile(data_arr.latitude.values[:, np.newaxis], (n_times, 1)).astype(np.float32)
+                    lon = np.tile(data_arr.longitude.values[:, np.newaxis], (n_times, 1)).astype(np.float32)
 
                     coords = np.concatenate([lat, lon], axis=1)
 
                 # data
-                data_per_channel.append(np.asarray(data_arr.data.reshape(-1, 1)))
+                data_per_channel.append(np.asarray(data_arr.data.reshape(-1, 1)).astype(np.float32))
 
             data = np.concatenate(data_per_channel, axis=1)
         except Exception as e:
-            _logger.debug(f"Date not present in ICON dataset: {str(e)}. Skipping.")
+            print(f"Date not present in ICON dataset: {str(e)}. Skipping.", flush=True)
             return ReaderData.empty(
-                num_data_fields=len(channels_idx), num_geo_fields=len(self.geoinfo_idx)
+                num_data_fields=len(channels_idx), num_geo_fields=len(self.geoinfo_idx), dtype=np.float32
             )
         ## Might be removed later TODO @asma
         # if data_per_channel[0].shape[0] == 0:
@@ -379,7 +386,7 @@ class DataReaderIconEsm(DataReaderTimestep):
         # print(f"{self.stream_info["name"]} timesteps: {data_arr.time.values}", flush=True)
         
         # Empty geoinfos
-        geoinfos = np.zeros((data.shape[0], 0), dtype=data.dtype)
+        geoinfos = np.zeros((data.shape[0], 0), dtype=np.float32)
 
         rd = ReaderData(
             coords=coords,
@@ -388,5 +395,5 @@ class DataReaderIconEsm(DataReaderTimestep):
             datetimes=datetimes,
         )
         check_reader_data(rd, dtr)
-        _logger.info(f"[DATA LOADED]", flush=True)
+        # print(f"[DATA LOADED]", flush=True)
         return rd

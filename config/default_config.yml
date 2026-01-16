@@ -162,4 +162,4 @@ training_mode_config: {"losses": {LossPhysical: {weight: 1.0, loss_fcts: [['mse'
                     
 validation_mode_config: {"losses": {LossPhysical: {weight: 1.0, loss_fcts: [['mse', 1.0]]},}
                         }
-multiprocessing_method: "fork"
+multiprocessing_method: "spawn"

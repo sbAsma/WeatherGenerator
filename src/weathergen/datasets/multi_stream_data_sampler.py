@@ -145,14 +145,14 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                     case "fesom":
                         dataset = DataReaderFesom
                         datapath = cf.data_path_fesom
-                    case type_name:
-                        reader_entry = get_extra_reader(type_name, cf)
+                    case _:
+                        reader_entry = get_extra_reader(stream_info["type"], cf)
                         if reader_entry is not None:
                             dataset = reader_entry.constructor
                             datapath = reader_entry.data_path
                         else:
-                            msg = f"Unsupported stream type {stream_info['type']}"
-                            f"for stream name '{stream_info['name']}'."
+                            msg = f"Unsupported stream type {stream_info['type']} " + \
+                                  f"for stream name '{stream_info['name']}'."
                             raise ValueError(msg)
 
                 datapath = pathlib.Path(datapath)

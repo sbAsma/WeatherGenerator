@@ -1,7 +1,10 @@
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 
 from weathergen.common.config import Config
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
