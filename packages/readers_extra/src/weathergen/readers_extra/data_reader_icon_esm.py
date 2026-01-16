@@ -57,11 +57,8 @@ class DataReaderIconEsm(DataReaderTimestep):
         fs = fsspec.filesystem("reference", fo=kerchunk_ref)
         mapper = fs.get_mapper("")
 
-        # Ensure metadata is consolidated for zarr-style access
-        zarr.consolidate_metadata(mapper)
-
-        # Open the dataset using Xarray with Zarr engine
-        self.ds = xr.open_dataset(mapper, engine="zarr", consolidated=True, chunks={"time": 1})
+        # Open the dataset using Xarray with Zarr engine (without consolidation for kerchunk references)
+        self.ds = xr.open_dataset(mapper, engine="zarr", consolidated=False, chunks={"time": 1})
 
         # get pressure levels
         self.plev = stream_info["plev"]
@@ -119,6 +116,9 @@ class DataReaderIconEsm(DataReaderTimestep):
             end_ds,
             self.temporal_frequency,
         )
+
+        # get target channel weights from stream config
+        self.target_channel_weights = self.parse_target_channel_weights()
 
         # Compute absolute start/end indices in the dataset based on time window
         self.start_idx = (tw_handler.t_start - start_ds).astype("timedelta64[D]").astype(
@@ -372,5 +372,5 @@ class DataReaderIconEsm(DataReaderTimestep):
             datetimes=datetimes,
         )
         check_reader_data(rd, dtr)
-        _logger.info("[DATA LOADED]", flush=True)
+        # _logger.info("[DATA LOADED]")
         return rd
