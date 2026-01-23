@@ -61,6 +61,9 @@ def inference_from_args(argl: list[str]):
     )
     cf = config.set_run_id(cf, args.run_id, args.reuse_run_id)
 
+    cf.loss_fcts_val = [["mse", 1.0]]
+    cf.loss_fcts = [["mse", 1.0]]
+
     devices = Trainer.init_torch()
     cf = Trainer.init_ddp(cf)
 
@@ -130,6 +133,9 @@ def train_continue_from_args(argl: list[str]):
     )
     cf = config.set_run_id(cf, args.run_id, args.reuse_run_id)
 
+    cf.loss_fcts_val = [["mse", 1.0]]
+    cf.loss_fcts = [["mse", 1.0]]
+
     devices = Trainer.init_torch()
     cf = Trainer.init_ddp(cf)
 
@@ -169,6 +175,8 @@ def train_with_args(argl: list[str], stream_dir: str | None):
     cf = config.set_run_id(cf, args.run_id, False)
 
     cf.data_loader_rng_seed = int(time.time())
+    cf.loss_fcts_val = [["mse", 1.0]]
+    cf.loss_fcts = [["mse", 1.0]]
     devices = Trainer.init_torch()
     cf = Trainer.init_ddp(cf)
 
