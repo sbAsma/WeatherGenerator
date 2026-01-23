@@ -19,7 +19,7 @@ from weathergen.datasets.data_reader_base import (
 
 type DType = np.float32  # The type for the data in the datasets.
 
-epsilon = 1e-4
+epsilon = 1e-30
 log_epsilon = np.log(epsilon)
 
 # Coefficients for the transformation: c1*min(x,2.5) + c2*log_term
@@ -65,17 +65,17 @@ class DataReaderCams(DataReaderTimestep):
         self.colnames = stream_info["variables"]  # list(self.ds)
         self.cols_idx = np.array(list(np.arange(len(self.colnames))))
 
-        # # Load associated statistics file for normalization
-        # stats_filename = Path(filename).with_name(Path(filename).stem + "_log_norm_stats.json")
-        # with open(stats_filename) as stats_file:
-        #     self.stats = json.load(stats_file)
+        # Load associated statistics file for normalization
+        stats_filename = Path(filename).with_name(Path(filename).stem + "_clipped_log_norm_stats.json")
+        with open(stats_filename) as stats_file:
+            self.stats = json.load(stats_file)
 
-        # # Variables included in the stats
-        # self.stats_vars = list(self.stats)
+        # Variables included in the stats
+        self.stats_vars = list(self.stats)
 
-        # # Load mean and standard deviation per variable
-        # self.mean = np.array([self.stats[var]["mean"] for var in self.stats_vars], dtype=np.float64)
-        # self.stdev = np.array([self.stats[var]["std"] for var in self.stats_vars], dtype=np.float64)
+        # Load mean and standard deviation per variable
+        self.mean = np.array([self.stats[var]["mean"] for var in self.stats_vars], dtype=np.float64)
+        self.stdev = np.array([self.stats[var]["std"] for var in self.stats_vars], dtype=np.float64)
 
         # Extract coordinates and pressure level
         self.lat = _clip_lat(self.ds["latitude"].values)
@@ -122,11 +122,11 @@ class DataReaderCams(DataReaderTimestep):
 
         # === Normalization statistics ===
 
-        # # Ensure stats match dataset columns
-        # assert self.stats_vars == self.colnames, (
-        #     f"Variables in normalization file {self.stats_vars} do not match "
-        #     f"dataset columns {self.colnames}"
-        # )
+        # Ensure stats match dataset columns
+        assert self.stats_vars == self.colnames, (
+            f"Variables in normalization file {self.stats_vars} do not match "
+            f"dataset columns {self.colnames}"
+        )
 
         # === Channel selection ===
         source_channels = stream_info.get("source")
@@ -135,13 +135,13 @@ class DataReaderCams(DataReaderTimestep):
         self.source_channels, self.source_idx = self.select("source", source_channels)
         self.target_channels, self.target_idx = self.select("target", target_channels)
 
-        # # Ensure all selected channels have valid standard deviations
-        # selected_channel_indices = list(set(self.source_idx).union(set(self.target_idx)))
-        # non_positive_stds = np.where(self.stdev[selected_channel_indices] <= 0)[0]
-        # assert len(non_positive_stds) == 0, (
-        #     f"Abort: Encountered non-positive standard deviations for selected columns "
-        #     f"{[self.colnames[selected_channel_indices][i] for i in non_positive_stds]}."
-        # )
+        # Ensure all selected channels have valid standard deviations
+        selected_channel_indices = list(set(self.source_idx).union(set(self.target_idx)))
+        non_positive_stds = np.where(self.stdev[selected_channel_indices] <= 0)[0]
+        assert len(non_positive_stds) == 0, (
+            f"Abort: Encountered non-positive standard deviations for selected columns "
+            f"{[self.colnames[selected_channel_indices][i] for i in non_positive_stds]}."
+        )
 
         # === Geo-info channels (currently unused) ===
         self.geoinfo_channels = []
