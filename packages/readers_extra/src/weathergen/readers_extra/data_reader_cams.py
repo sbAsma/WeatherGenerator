@@ -19,8 +19,12 @@ from weathergen.datasets.data_reader_base import (
 
 type DType = np.float32  # The type for the data in the datasets.
 
-epsilon = 1e-35
+epsilon = 1e-4
 log_epsilon = np.log(epsilon)
+
+# Coefficients for the transformation: c1*min(x,2.5) + c2*log_term
+c1 = 0.4  # Weight for linear clipped term
+c2 = 0.6  # Weight for logarithmic term
 
 
 ############################################################################
@@ -56,21 +60,22 @@ class DataReaderCams(DataReaderTimestep):
         # merge along variables
         self.ds = xr.merge([ds_surface, ds_profiles])
 
+        self.stream_info = stream_info
         # Column (variable) names and indices
         self.colnames = stream_info["variables"]  # list(self.ds)
         self.cols_idx = np.array(list(np.arange(len(self.colnames))))
 
-        # Load associated statistics file for normalization
-        stats_filename = Path(filename).with_name(Path(filename).stem + "_log_norm_stats.json")
-        with open(stats_filename) as stats_file:
-            self.stats = json.load(stats_file)
+        # # Load associated statistics file for normalization
+        # stats_filename = Path(filename).with_name(Path(filename).stem + "_log_norm_stats.json")
+        # with open(stats_filename) as stats_file:
+        #     self.stats = json.load(stats_file)
 
-        # Variables included in the stats
-        self.stats_vars = list(self.stats)
+        # # Variables included in the stats
+        # self.stats_vars = list(self.stats)
 
-        # Load mean and standard deviation per variable
-        self.mean = np.array([self.stats[var]["mean"] for var in self.stats_vars], dtype=np.float64)
-        self.stdev = np.array([self.stats[var]["std"] for var in self.stats_vars], dtype=np.float64)
+        # # Load mean and standard deviation per variable
+        # self.mean = np.array([self.stats[var]["mean"] for var in self.stats_vars], dtype=np.float64)
+        # self.stdev = np.array([self.stats[var]["std"] for var in self.stats_vars], dtype=np.float64)
 
         # Extract coordinates and pressure level
         self.lat = _clip_lat(self.ds["latitude"].values)
@@ -117,11 +122,11 @@ class DataReaderCams(DataReaderTimestep):
 
         # === Normalization statistics ===
 
-        # Ensure stats match dataset columns
-        assert self.stats_vars == self.colnames, (
-            f"Variables in normalization file {self.stats_vars} do not match "
-            f"dataset columns {self.colnames}"
-        )
+        # # Ensure stats match dataset columns
+        # assert self.stats_vars == self.colnames, (
+        #     f"Variables in normalization file {self.stats_vars} do not match "
+        #     f"dataset columns {self.colnames}"
+        # )
 
         # === Channel selection ===
         source_channels = stream_info.get("source")
@@ -130,13 +135,13 @@ class DataReaderCams(DataReaderTimestep):
         self.source_channels, self.source_idx = self.select("source", source_channels)
         self.target_channels, self.target_idx = self.select("target", target_channels)
 
-        # Ensure all selected channels have valid standard deviations
-        selected_channel_indices = list(set(self.source_idx).union(set(self.target_idx)))
-        non_positive_stds = np.where(self.stdev[selected_channel_indices] <= 0)[0]
-        assert len(non_positive_stds) == 0, (
-            f"Abort: Encountered non-positive standard deviations for selected columns "
-            f"{[self.colnames[selected_channel_indices][i] for i in non_positive_stds]}."
-        )
+        # # Ensure all selected channels have valid standard deviations
+        # selected_channel_indices = list(set(self.source_idx).union(set(self.target_idx)))
+        # non_positive_stds = np.where(self.stdev[selected_channel_indices] <= 0)[0]
+        # assert len(non_positive_stds) == 0, (
+        #     f"Abort: Encountered non-positive standard deviations for selected columns "
+        #     f"{[self.colnames[selected_channel_indices][i] for i in non_positive_stds]}."
+        # )
 
         # === Geo-info channels (currently unused) ===
         self.geoinfo_channels = []
@@ -202,9 +207,13 @@ class DataReaderCams(DataReaderTimestep):
             Structured data containing coordinates, metadata, variable data, and timestamps
         """
         (t_idxs, dtr) = self._get_dataset_idxs(idx)
+        # if self.stream_info == "CAMSANALYSIS":
+        #     _logger.info(f"Extracting stream {self.stream_info['name']} data for time indices: {dtr}")
 
         # Return empty data if dataset is unavailable or no valid time indices
         if self.ds is None or self.len == 0 or len(t_idxs) == 0:
+            # _logger.info(f"{self.stream_info['name']} dataset unavailable or no valid time indices. Returning empty data.")
+            
             return ReaderData.empty(
                 num_data_fields=len(channels_idx), num_geo_fields=len(self.geoinfo_idx)
             )
@@ -291,58 +300,176 @@ class DataReaderCams(DataReaderTimestep):
         check_reader_data(rd, dtr)
         return rd
 
-    @staticmethod
     @override
-    def _normalize(
-        data: NDArray[DType],
-        idx: list[int],
-        mean: dict[int, float],
-        stdev: dict[int, float],
-        name: str,
-    ) -> NDArray[DType]:
+    def normalize_source_channels(self, source: NDArray[DType]) -> NDArray[DType]:
         """
-        Logarithmic normalization followed by z-normalization
+        Normalize source channels using combined clipped linear and logarithmic transformation:
+        x_transformed = c1 * min(x, 2.5) + c2 * (log(max(x, 10^-4)) - log(10^-4)) / (-log(10^-4))
+
+        Parameters
+        ----------
+        source :
+            data to be normalized
+
+        Returns
+        -------
+        Normalized data
         """
-        if data.shape[-1] != len(idx):
+        if source.shape[-1] != len(self.source_idx):
             raise ValueError(
-                f"incorrect number of {name} channels: expected {len(idx)}, got {data.shape[-1]}"
+                f"incorrect number of source channels: expected {len(self.source_idx)}, "
+                f"got {source.shape[-1]}"
             )
-        
-        for i, ch in enumerate(idx):
-            # Ensure positive values by clipping to minimum threshold
-            clipped_data = np.maximum(data[..., i], epsilon)
-            # Apply logarithmic transformation
-            data[..., i] = (np.log(clipped_data) - log_epsilon)/log_epsilon
-            # Apply z-normalization on top of log-norm
-            data[..., i] = (data[..., i] - mean[ch]) / stdev[ch]
 
-        return data
+        for i, ch in enumerate(self.source_idx):
+            x = source[..., i]
+            # Linear clipped term: c1 * min(x, 2.5)
+            linear_term = c1 * np.minimum(x, 2.5)
+            # Logarithmic term: c2 * (log(max(x, 10^-4)) - log(10^-4)) / (-log(10^-4))
+            clipped_data = np.maximum(x, epsilon)
+            log_term = c2 * (np.log(clipped_data) - log_epsilon) / (-log_epsilon)
+            # Combined transformation
+            source[..., i] = linear_term + log_term
 
-    @staticmethod
+        return source
+
     @override
-    def _denormalize(
-        data: NDArray[DType],
-        idx: list[int],
-        mean: dict[int, float],
-        stdev: dict[int, float],
-        name: str,
-    ) -> NDArray[DType]:
+    def normalize_target_channels(self, target: NDArray[DType]) -> NDArray[DType]:
         """
-        Reverse z-normalization followed by reverse logarithmic normalization
+        Normalize target channels using combined clipped linear and logarithmic transformation:
+        x_transformed = c1 * min(x, 2.5) + c2 * (log(max(x, 10^-4)) - log(10^-4)) / (-log(10^-4))
+
+        Parameters
+        ----------
+        target :
+            data to be normalized
+
+        Returns
+        -------
+        Normalized data
         """
-        if data.shape[-1] != len(idx):
+        if target.shape[-1] != len(self.target_idx):
             raise ValueError(
-                f"incorrect number of {name} channels: expected {len(idx)}, got {data.shape[-1]}"
+                f"incorrect number of target channels: expected {len(self.target_idx)}, "
+                f"got {target.shape[-1]}"
             )
-        
-        for i, ch in enumerate(idx):
-            # Reverse z-normalization first
-            data[..., i] = (data[..., i] * stdev[ch]) + mean[ch]
-            # Reverse logarithmic transformation
-            # Keep tensor operations on the same device
-            if torch.is_tensor(data):
-                data[..., i] = torch.exp(data[..., i] * log_epsilon + log_epsilon)
+
+        for i, ch in enumerate(self.target_idx):
+            x = target[..., i]
+            # Linear clipped term: c1 * min(x, 2.5)
+            linear_term = c1 * np.minimum(x, 2.5)
+            # Logarithmic term: c2 * (log(max(x, 10^-4)) - log(10^-4)) / (-log(10^-4))
+            clipped_data = np.maximum(x, epsilon)
+            log_term = c2 * (np.log(clipped_data) - log_epsilon) / (-log_epsilon)
+            # Combined transformation
+            target[..., i] = linear_term + log_term
+
+        return target
+
+    @override
+    def denormalize_source_channels(self, source: NDArray[DType]) -> NDArray[DType]:
+        """
+        Denormalize source channels by reversing the combined transformation.
+        Uses iterative Newton-Raphson method to approximate the inverse.
+
+        Parameters
+        ----------
+        source :
+            data to be denormalized
+
+        Returns
+        -------
+        Denormalized data
+        """
+        if source.shape[-1] != len(self.source_idx):
+            raise ValueError(
+                f"incorrect number of source channels: expected {len(self.source_idx)}, "
+                f"got {source.shape[-1]}"
+            )
+
+        for i, ch in enumerate(self.source_idx):
+            y = source[..., i]
+            # Use iterative method to find x such that: y = c1*min(x,2.5) + c2*(log(max(x,ε))-log(ε))/(-log(ε))
+            # Initial guess: assume log term dominates
+            if torch.is_tensor(y):
+                x = torch.exp(y / c2 * (-log_epsilon) + log_epsilon)
+                # Iterative refinement (5 iterations should suffice)
+                for _ in range(5):
+                    # Compute current transformation
+                    linear_term = c1 * torch.minimum(x, torch.tensor(2.5))
+                    clipped = torch.maximum(x, torch.tensor(epsilon))
+                    log_term = c2 * (torch.log(clipped) - log_epsilon) / (-log_epsilon)
+                    y_pred = linear_term + log_term
+                    # Update estimate (simple gradient step)
+                    error = y - y_pred
+                    x = x + 0.1 * error * x  # Scaled update
+                    x = torch.maximum(x, torch.tensor(epsilon))  # Keep positive
+                source[..., i] = x
             else:
-                data[..., i] = np.exp(data[..., i] * log_epsilon + log_epsilon)
+                x = np.exp(y / c2 * (-log_epsilon) + log_epsilon)
+                # Iterative refinement
+                for _ in range(5):
+                    linear_term = c1 * np.minimum(x, 2.5)
+                    clipped = np.maximum(x, epsilon)
+                    log_term = c2 * (np.log(clipped) - log_epsilon) / (-log_epsilon)
+                    y_pred = linear_term + log_term
+                    error = y - y_pred
+                    x = x + 0.1 * error * x
+                    x = np.maximum(x, epsilon)
+                source[..., i] = x
 
-        return data
+        return source
+
+    @override
+    def denormalize_target_channels(self, target: NDArray[DType]) -> NDArray[DType]:
+        """
+        Denormalize target channels by reversing the combined transformation.
+        Uses iterative Newton-Raphson method to approximate the inverse.
+
+        Parameters
+        ----------
+        target :
+            data to be denormalized
+
+        Returns
+        -------
+        Denormalized data
+        """
+        if target.shape[-1] != len(self.target_idx):
+            raise ValueError(
+                f"incorrect number of target channels: expected {len(self.target_idx)}, "
+                f"got {target.shape[-1]}"
+            )
+
+        for i, ch in enumerate(self.target_idx):
+            y = target[..., i]
+            # Use iterative method to find x such that: y = c1*min(x,2.5) + c2*(log(max(x,ε))-log(ε))/(-log(ε))
+            # Initial guess: assume log term dominates
+            if torch.is_tensor(y):
+                x = torch.exp(y / c2 * (-log_epsilon) + log_epsilon)
+                # Iterative refinement (5 iterations should suffice)
+                for _ in range(5):
+                    # Compute current transformation
+                    linear_term = c1 * torch.minimum(x, torch.tensor(2.5))
+                    clipped = torch.maximum(x, torch.tensor(epsilon))
+                    log_term = c2 * (torch.log(clipped) - log_epsilon) / (-log_epsilon)
+                    y_pred = linear_term + log_term
+                    # Update estimate (simple gradient step)
+                    error = y - y_pred
+                    x = x + 0.1 * error * x  # Scaled update
+                    x = torch.maximum(x, torch.tensor(epsilon))  # Keep positive
+                target[..., i] = x
+            else:
+                x = np.exp(y / c2 * (-log_epsilon) + log_epsilon)
+                # Iterative refinement
+                for _ in range(5):
+                    linear_term = c1 * np.minimum(x, 2.5)
+                    clipped = np.maximum(x, epsilon)
+                    log_term = c2 * (np.log(clipped) - log_epsilon) / (-log_epsilon)
+                    y_pred = linear_term + log_term
+                    error = y - y_pred
+                    x = x + 0.1 * error * x
+                    x = np.maximum(x, epsilon)
+                target[..., i] = x
+
+        return target
