@@ -19,12 +19,12 @@ from weathergen.datasets.data_reader_base import (
 
 type DType = np.float32  # The type for the data in the datasets.
 
-epsilon = 1e-30
+epsilon = 1e-4
 log_epsilon = np.log(epsilon)
 
 # Coefficients for the transformation: c1*min(x,2.5) + c2*log_term
-c1 = 0.4  # Weight for linear clipped term
-c2 = 0.6  # Weight for logarithmic term
+c1 = 0.5  # Weight for linear clipped term
+c2 = 0.5  # Weight for logarithmic term
 
 
 ############################################################################
@@ -73,9 +73,10 @@ class DataReaderCams(DataReaderTimestep):
         # Variables included in the stats
         self.stats_vars = list(self.stats)
 
-        # Load mean and standard deviation per variable
+        # Load mean, standard deviation, and max per variable
         self.mean = np.array([self.stats[var]["mean"] for var in self.stats_vars], dtype=np.float64)
         self.stdev = np.array([self.stats[var]["std"] for var in self.stats_vars], dtype=np.float64)
+        self.max = np.array([self.stats[var]["max"] for var in self.stats_vars], dtype=np.float64)
 
         # Extract coordinates and pressure level
         self.lat = _clip_lat(self.ds["latitude"].values)
@@ -135,12 +136,12 @@ class DataReaderCams(DataReaderTimestep):
         self.source_channels, self.source_idx = self.select("source", source_channels)
         self.target_channels, self.target_idx = self.select("target", target_channels)
 
-        # Ensure all selected channels have valid standard deviations
+        # Ensure all selected channels have valid max values
         selected_channel_indices = list(set(self.source_idx).union(set(self.target_idx)))
-        non_positive_stds = np.where(self.stdev[selected_channel_indices] <= 0)[0]
-        assert len(non_positive_stds) == 0, (
-            f"Abort: Encountered non-positive standard deviations for selected columns "
-            f"{[self.colnames[selected_channel_indices][i] for i in non_positive_stds]}."
+        non_positive_maxs = np.where(self.max[selected_channel_indices] <= 0)[0]
+        assert len(non_positive_maxs) == 0, (
+            f"Abort: Encountered non-positive max values for selected columns "
+            f"{[self.colnames[selected_channel_indices][i] for i in non_positive_maxs]}."
         )
 
         # === Geo-info channels (currently unused) ===
@@ -303,8 +304,9 @@ class DataReaderCams(DataReaderTimestep):
     @override
     def normalize_source_channels(self, source: NDArray[DType]) -> NDArray[DType]:
         """
-        Normalize source channels using combined clipped linear and logarithmic transformation:
-        x_transformed = c1 * min(x, 2.5) + c2 * (log(max(x, 10^-4)) - log(10^-4)) / (-log(10^-4))
+        Normalize source channels using two-step process:
+        Step 1: Normalize by scale (max): x_scaled = x / scale_v
+        Step 2: Apply transformation: c1 * min(x_scaled, 2.5) + c2 * (log(max(x_scaled, 10^-4)) - log(10^-4)) / (-log(10^-4))
 
         Parameters
         ----------
@@ -323,12 +325,15 @@ class DataReaderCams(DataReaderTimestep):
 
         for i, ch in enumerate(self.source_idx):
             x = source[..., i]
-            # Linear clipped term: c1 * min(x, 2.5)
-            linear_term = c1 * np.minimum(x, 2.5)
-            # Logarithmic term: c2 * (log(max(x, 10^-4)) - log(10^-4)) / (-log(10^-4))
-            clipped_data = np.maximum(x, epsilon)
+            scale_v = self.max[ch]
+            
+            # Step 1: Normalize by scale
+            x_scaled = x / scale_v
+            
+            # Step 2: Apply transformation (Equation B9)
+            linear_term = c1 * np.minimum(x_scaled, 2.5)
+            clipped_data = np.maximum(x_scaled, epsilon)
             log_term = c2 * (np.log(clipped_data) - log_epsilon) / (-log_epsilon)
-            # Combined transformation
             source[..., i] = linear_term + log_term
 
         return source
@@ -336,8 +341,9 @@ class DataReaderCams(DataReaderTimestep):
     @override
     def normalize_target_channels(self, target: NDArray[DType]) -> NDArray[DType]:
         """
-        Normalize target channels using combined clipped linear and logarithmic transformation:
-        x_transformed = c1 * min(x, 2.5) + c2 * (log(max(x, 10^-4)) - log(10^-4)) / (-log(10^-4))
+        Normalize target channels using two-step process:
+        Step 1: Normalize by scale (max): x_scaled = x / scale_v
+        Step 2: Apply transformation: c1 * min(x_scaled, 2.5) + c2 * (log(max(x_scaled, 10^-4)) - log(10^-4)) / (-log(10^-4))
 
         Parameters
         ----------
@@ -356,12 +362,15 @@ class DataReaderCams(DataReaderTimestep):
 
         for i, ch in enumerate(self.target_idx):
             x = target[..., i]
-            # Linear clipped term: c1 * min(x, 2.5)
-            linear_term = c1 * np.minimum(x, 2.5)
-            # Logarithmic term: c2 * (log(max(x, 10^-4)) - log(10^-4)) / (-log(10^-4))
-            clipped_data = np.maximum(x, epsilon)
+            scale_v = self.max[ch]
+            
+            # Step 1: Normalize by scale
+            x_scaled = x / scale_v
+            
+            # Step 2: Apply transformation (Equation B9)
+            linear_term = c1 * np.minimum(x_scaled, 2.5)
+            clipped_data = np.maximum(x_scaled, epsilon)
             log_term = c2 * (np.log(clipped_data) - log_epsilon) / (-log_epsilon)
-            # Combined transformation
             target[..., i] = linear_term + log_term
 
         return target
@@ -369,8 +378,10 @@ class DataReaderCams(DataReaderTimestep):
     @override
     def denormalize_source_channels(self, source: NDArray[DType]) -> NDArray[DType]:
         """
-        Denormalize source channels by reversing the combined transformation.
-        Uses iterative Newton-Raphson method to approximate the inverse.
+        Denormalize source channels by reversing the two-step process:
+        Step 1: Reverse transformation to get x_scaled
+        Step 2: Unscale: x = x_scaled * scale_v
+        Uses iterative Newton-Raphson method to approximate the inverse transformation.
 
         Parameters
         ----------
@@ -389,42 +400,50 @@ class DataReaderCams(DataReaderTimestep):
 
         for i, ch in enumerate(self.source_idx):
             y = source[..., i]
-            # Use iterative method to find x such that: y = c1*min(x,2.5) + c2*(log(max(x,ε))-log(ε))/(-log(ε))
-            # Initial guess: assume log term dominates
+            scale_v = self.max[ch]
+            
+            # Step 1: Reverse transformation to get x_scaled
+            # Use iterative method to find x_scaled such that: y = c1*min(x_scaled,2.5) + c2*(log(max(x_scaled,ε))-log(ε))/(-log(ε))
             if torch.is_tensor(y):
-                x = torch.exp(y / c2 * (-log_epsilon) + log_epsilon)
+                # Initial guess: assume log term dominates
+                x_scaled = torch.exp(y / c2 * (-log_epsilon) + log_epsilon)
                 # Iterative refinement (5 iterations should suffice)
                 for _ in range(5):
-                    # Compute current transformation
-                    linear_term = c1 * torch.minimum(x, torch.tensor(2.5))
-                    clipped = torch.maximum(x, torch.tensor(epsilon))
+                    linear_term = c1 * torch.minimum(x_scaled, torch.tensor(2.5))
+                    clipped = torch.maximum(x_scaled, torch.tensor(epsilon))
                     log_term = c2 * (torch.log(clipped) - log_epsilon) / (-log_epsilon)
                     y_pred = linear_term + log_term
-                    # Update estimate (simple gradient step)
                     error = y - y_pred
-                    x = x + 0.1 * error * x  # Scaled update
-                    x = torch.maximum(x, torch.tensor(epsilon))  # Keep positive
-                source[..., i] = x
+                    x_scaled = x_scaled + 0.1 * error * x_scaled  # Scaled update
+                    x_scaled = torch.maximum(x_scaled, torch.tensor(epsilon))  # Keep positive
+                
+                # Step 2: Unscale
+                source[..., i] = x_scaled * scale_v
             else:
-                x = np.exp(y / c2 * (-log_epsilon) + log_epsilon)
+                # Initial guess: assume log term dominates
+                x_scaled = np.exp(y / c2 * (-log_epsilon) + log_epsilon)
                 # Iterative refinement
                 for _ in range(5):
-                    linear_term = c1 * np.minimum(x, 2.5)
-                    clipped = np.maximum(x, epsilon)
+                    linear_term = c1 * np.minimum(x_scaled, 2.5)
+                    clipped = np.maximum(x_scaled, epsilon)
                     log_term = c2 * (np.log(clipped) - log_epsilon) / (-log_epsilon)
                     y_pred = linear_term + log_term
                     error = y - y_pred
-                    x = x + 0.1 * error * x
-                    x = np.maximum(x, epsilon)
-                source[..., i] = x
+                    x_scaled = x_scaled + 0.1 * error * x_scaled
+                    x_scaled = np.maximum(x_scaled, epsilon)
+                
+                # Step 2: Unscale
+                source[..., i] = x_scaled * scale_v
 
         return source
 
     @override
     def denormalize_target_channels(self, target: NDArray[DType]) -> NDArray[DType]:
         """
-        Denormalize target channels by reversing the combined transformation.
-        Uses iterative Newton-Raphson method to approximate the inverse.
+        Denormalize target channels by reversing the two-step process:
+        Step 1: Reverse transformation to get x_scaled
+        Step 2: Unscale: x = x_scaled * scale_v
+        Uses iterative Newton-Raphson method to approximate the inverse transformation.
 
         Parameters
         ----------
@@ -443,33 +462,39 @@ class DataReaderCams(DataReaderTimestep):
 
         for i, ch in enumerate(self.target_idx):
             y = target[..., i]
-            # Use iterative method to find x such that: y = c1*min(x,2.5) + c2*(log(max(x,ε))-log(ε))/(-log(ε))
-            # Initial guess: assume log term dominates
+            scale_v = self.max[ch]
+            
+            # Step 1: Reverse transformation to get x_scaled
+            # Use iterative method to find x_scaled such that: y = c1*min(x_scaled,2.5) + c2*(log(max(x_scaled,ε))-log(ε))/(-log(ε))
             if torch.is_tensor(y):
-                x = torch.exp(y / c2 * (-log_epsilon) + log_epsilon)
+                # Initial guess: assume log term dominates
+                x_scaled = torch.exp(y / c2 * (-log_epsilon) + log_epsilon)
                 # Iterative refinement (5 iterations should suffice)
                 for _ in range(5):
-                    # Compute current transformation
-                    linear_term = c1 * torch.minimum(x, torch.tensor(2.5))
-                    clipped = torch.maximum(x, torch.tensor(epsilon))
+                    linear_term = c1 * torch.minimum(x_scaled, torch.tensor(2.5))
+                    clipped = torch.maximum(x_scaled, torch.tensor(epsilon))
                     log_term = c2 * (torch.log(clipped) - log_epsilon) / (-log_epsilon)
                     y_pred = linear_term + log_term
-                    # Update estimate (simple gradient step)
                     error = y - y_pred
-                    x = x + 0.1 * error * x  # Scaled update
-                    x = torch.maximum(x, torch.tensor(epsilon))  # Keep positive
-                target[..., i] = x
+                    x_scaled = x_scaled + 0.1 * error * x_scaled  # Scaled update
+                    x_scaled = torch.maximum(x_scaled, torch.tensor(epsilon))  # Keep positive
+                
+                # Step 2: Unscale
+                target[..., i] = x_scaled * scale_v
             else:
-                x = np.exp(y / c2 * (-log_epsilon) + log_epsilon)
+                # Initial guess: assume log term dominates
+                x_scaled = np.exp(y / c2 * (-log_epsilon) + log_epsilon)
                 # Iterative refinement
                 for _ in range(5):
-                    linear_term = c1 * np.minimum(x, 2.5)
-                    clipped = np.maximum(x, epsilon)
+                    linear_term = c1 * np.minimum(x_scaled, 2.5)
+                    clipped = np.maximum(x_scaled, epsilon)
                     log_term = c2 * (np.log(clipped) - log_epsilon) / (-log_epsilon)
                     y_pred = linear_term + log_term
                     error = y - y_pred
-                    x = x + 0.1 * error * x
-                    x = np.maximum(x, epsilon)
-                target[..., i] = x
+                    x_scaled = x_scaled + 0.1 * error * x_scaled
+                    x_scaled = np.maximum(x_scaled, epsilon)
+                
+                # Step 2: Unscale
+                target[..., i] = x_scaled * scale_v
 
         return target
