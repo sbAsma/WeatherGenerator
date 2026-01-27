@@ -32,22 +32,25 @@ from weathergen.utils.utils import get_dtype
 class EmbeddingEngine(torch.nn.Module):
     name: "EmbeddingEngine"
 
-    def __init__(self, cf: Config, sources_size) -> None:
+    def __init__(self, cf: Config, sources_size, chemistry_embedding=None) -> None:
         """
         Initialize the EmbeddingEngine with the configuration.
 
         :param cf: Configuration object containing parameters for the engine.
         :param sources_size: List of source sizes for each stream.
+        :param chemistry_embedding: Optional chemistry embedding function.
         """
         super(EmbeddingEngine, self).__init__()
         self.cf = cf
-        self.sources_size = sources_size  # KCT:iss130, what is this?
+        self.sources_size = sources_size  # ✅ Add this line BEFORE using it
+        self.chemistry_embedding = chemistry_embedding
+
+        # Build standard embeddings for all streams
         self.embeds = torch.nn.ModuleList()
+        for i_obs, si in enumerate(cf.streams):
+            stream_name = si.get("name", f"stream_{i_obs}")
 
-        for i, si in enumerate(self.cf.streams):
-            stream_name = si.get("name", i)
-
-            if si.get("diagnostic", False) or self.sources_size[i] == 0:
+            if si.get("diagnostic", False) or self.sources_size[i_obs] == 0:
                 self.embeds.append(torch.nn.Identity())
                 continue
 
@@ -57,7 +60,7 @@ class EmbeddingEngine(torch.nn.Module):
                         mode=self.cf.embed_orientation,
                         num_tokens=si["embed"]["num_tokens"],
                         token_size=si["token_size"],
-                        num_channels=self.sources_size[i],
+                        num_channels=self.sources_size[i_obs],
                         dim_embed=si["embed"]["dim_embed"],
                         dim_out=self.cf.ae_local_dim_embed,
                         num_blocks=si["embed"]["num_blocks"],
@@ -72,7 +75,7 @@ class EmbeddingEngine(torch.nn.Module):
             elif si["embed"]["net"] == "linear":
                 self.embeds.append(
                     StreamEmbedLinear(
-                        self.sources_size[i] * si["token_size"],
+                        self.sources_size[i_obs] * si["token_size"],
                         self.cf.ae_local_dim_embed,
                         stream_name=stream_name,
                     )
@@ -81,48 +84,75 @@ class EmbeddingEngine(torch.nn.Module):
                 raise ValueError("Unsupported embedding network type")
 
     def forward(self, streams_data, pe_embed, dtype, device):
-        source_tokens_lens = torch.stack(
-            [
-                torch.stack(
-                    [
-                        s.source_tokens_lens if len(s.source_tokens_lens) > 0 else torch.tensor([])
-                        for s in stl_b
-                    ]
-                )
-                for stl_b in streams_data
-            ]
-        )
-        offsets_base = source_tokens_lens.sum(1).sum(0).cumsum(0)
+        tokens_all = []
 
-        tokens_all = torch.empty(
-            (int(offsets_base[-1]), self.cf.ae_local_dim_embed), dtype=dtype, device=device
-        )
+        for i_stream, stream_info in enumerate(self.cf.streams):
+            stream_name = stream_info.get("name", f"stream_{i_stream}")
+            
+            # Check if this stream should use chemistry embedding
+            target_streams = []
+            if hasattr(self.cf, 'chemistry_reduction') and hasattr(self.cf.chemistry_reduction, 'target_streams'):
+                target_streams = self.cf.chemistry_reduction.target_streams
+            
+            if (stream_name in target_streams and 
+                self.chemistry_embedding is not None):
+                
+                # Apply ABP to CAMS data
+                batch_tokens = []
+                for sb in streams_data:
+                    # Extract chemistry data from the batch
+                    s = sb[i_stream]
+                    
+                    if not s.source_empty():
+                        # For CAMS chemistry streams, source_tokens_cells has shape:
+                        # (n_cells, token_size, n_channels) or (n_cells, H, W, C)
+                        chem_data = s.source_tokens_cells
+                        
+                        # Move to correct device and dtype
+                        chem_data = chem_data.to(device=device, dtype=dtype)
+                        
+                        # Flatten cells: (n_cells, ...) -> process each cell
+                        n_cells = chem_data.shape[0]
+                        
+                        # Reshape to (n_cells, H, W, C_in) if needed
+                        # Then apply ABP to each cell's data
+                        if chem_data.dim() == 4:
+                            # Already (n_cells, H, W, C)
+                            chem_embed = self.chemistry_embedding(chem_data)  # (n_cells, d_embedding)
+                        elif chem_data.dim() == 3:
+                            # (n_cells, token_size, n_channels) - need to reshape
+                            # For now, treat each cell's data as batch
+                            chem_embed = self.chemistry_embedding(chem_data.unsqueeze(1))  # Add spatial dim
+                        else:
+                            raise ValueError(f"Unexpected chem_data shape: {chem_data.shape}")
+                        
+                        batch_tokens.append(chem_embed)
+                
+                if batch_tokens:
+                    tokens = torch.cat(batch_tokens, dim=0)  # (total_cells, d_embedding)
+                else:
+                    tokens = torch.empty((0, self.cf.ae_local_dim_embed), dtype=dtype, device=device)
+            else:
+                # Use standard embedding - ORIGINAL PATTERN
+                # Loop through batch items and call embed with only source_tokens_cells and source_centroids
+                embed = self.embeds[i_stream]
+                batch_tokens = []
+                for sb in streams_data:  # Loop over batch
+                    s = sb[i_stream]  # Get StreamData for this stream
+                    if not s.source_empty():
+                        # Original calling pattern: embed(source_tokens_cells, source_centroids)
+                        x_embed = embed(s.source_tokens_cells, s.source_centroids).flatten(0, 1)
+                        batch_tokens.append(x_embed)
+                
+                if batch_tokens:
+                    tokens = torch.cat(batch_tokens, dim=0)
+                else:
+                    # Handle empty case
+                    tokens = torch.empty((0, self.cf.ae_local_dim_embed), dtype=dtype, device=device)
+            
+            tokens_all.append(tokens)
 
-        for _, sb in enumerate(streams_data):
-            for _, (s, embed) in enumerate(zip(sb, self.embeds, strict=False)):
-                if not s.source_empty():
-                    idxs = s.source_idxs_embed.to(device)
-                    idxs_pe = s.source_idxs_embed_pe.to(device)
-
-                    # create full scatter index
-                    # (there's no broadcasting which is likely highly inefficient)
-                    idxs = idxs.unsqueeze(1).repeat((1, self.cf.ae_local_dim_embed))
-                    x_embed = embed(s.source_tokens_cells, s.source_centroids).flatten(0, 1)
-                    # there's undocumented limitation in flash_attn that will make embed fail if
-                    # #tokens is too large; code below is a work around
-                    # x_embed = torch.cat(
-                    #     [
-                    #         embed(s_c, c_c).flatten(0, 1)
-                    #         for s_c, c_c in zip(
-                    #             torch.split(s.source_tokens_cells, 49152),
-                    #             torch.split(s.source_centroids, 49152),
-                    #         )
-                    #     ]
-                    # )
-
-                    # scatter write to reorder from per stream to per cell ordering
-                    tokens_all.scatter_(0, idxs, x_embed + pe_embed[idxs_pe])
-        return tokens_all
+        return torch.cat(tokens_all, dim=0)
 
 
 class LocalAssimilationEngine(torch.nn.Module):

@@ -258,16 +258,28 @@ class Model(torch.nn.Module):
 
         # Chemistry embedding for CAMS data (optional)
         if hasattr(cf, 'enable_chemistry_embedding') and cf.enable_chemistry_embedding:
-            self.cams_chemistry_embedding = ChemistryStreamEmbedding(
-                n_species=getattr(cf, 'n_cams_species', 50),
-                n_levels=getattr(cf, 'n_levels', 25),
-                n_emissions=getattr(cf, 'n_emissions', 10),
-                spatial_h=getattr(cf, 'spatial_h', 100),
-                spatial_w=getattr(cf, 'spatial_w', 100),
-                d_embedding=getattr(cf, 'd_embedding', 512),
-                d_intermediate=getattr(cf, 'd_intermediate', 1800),
-                n_inducing=getattr(cf, 'n_inducing', 64)
-            )
+            if hasattr(cf, 'chemistry_reduction') and cf.chemistry_reduction.method == 'attention_based_pooling':
+                self.cams_chemistry_embedding = ChemistryStreamEmbedding(
+                    n_species=cf.chemistry_reduction.n_species,
+                    n_levels=cf.chemistry_reduction.n_levels,
+                    n_emissions=cf.chemistry_reduction.n_emissions,
+                    spatial_h=cf.chemistry_reduction.spatial_h,
+                    spatial_w=cf.chemistry_reduction.spatial_w,
+                    d_embedding=cf.chemistry_reduction.d_embedding,
+                    d_intermediate=cf.chemistry_reduction.d_intermediate,
+                    n_inducing=cf.chemistry_reduction.n_inducing
+                )
+            else:
+                self.cams_chemistry_embedding = ChemistryStreamEmbedding(
+                    n_species=getattr(cf, 'n_cams_species', 59),
+                    n_levels=getattr(cf, 'n_levels', 13),
+                    n_emissions=getattr(cf, 'n_emissions', 0),
+                    spatial_h=getattr(cf, 'spatial_h', 100),  # Your domain height
+                    spatial_w=getattr(cf, 'spatial_w', 100),  # Your domain width
+                    d_embedding=getattr(cf, 'd_embedding', 512),
+                    d_intermediate=getattr(cf, 'd_intermediate', 1800),
+                    n_inducing=getattr(cf, 'n_inducing', 64)
+                )
         else:
             self.cams_chemistry_embedding = None
 
@@ -278,7 +290,7 @@ class Model(torch.nn.Module):
         cf = self.cf
 
         # separate embedding networks for differnt observation types
-        self.embed_engine = EmbeddingEngine(cf, self.sources_size)
+        self.embed_engine = EmbeddingEngine(cf, self.sources_size, self.cams_chemistry_embedding)
 
         ##############
         # local assimilation engine

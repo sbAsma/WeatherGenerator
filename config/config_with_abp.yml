@@ -7,7 +7,7 @@ chemistry_stream:
 chemistry_reduction:
   n_species: 59              # CAMS analysis species
   n_levels: 13               # vertical levels
-  n_emissions: 10            # emission sectors
+  n_emissions: 0            # emission sectors
   d_intermediate: 1800       # Zeeman-style capacity
   n_inducing: 64             # ABP inducing points
   

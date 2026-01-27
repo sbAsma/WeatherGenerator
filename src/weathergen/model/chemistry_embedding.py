@@ -5,7 +5,7 @@ Integrates into WeatherGenerator embedding pipeline.
 
 import torch
 import torch.nn as nn
-from abp import ChannelStackedABP
+from weathergen.model.abp import ChannelStackedABP
 
 
 class ChemistryStreamEmbedding(nn.Module):
