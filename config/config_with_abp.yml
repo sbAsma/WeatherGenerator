@@ -1,0 +1,18 @@
+# Add to your WeatherGenerator config
+
+chemistry_stream:
+  enabled: true
+  method: "attention_based_pooling"
+  
+chemistry_reduction:
+  n_species: 59              # CAMS analysis species
+  n_levels: 13               # vertical levels
+  n_emissions: 10            # emission sectors
+  d_intermediate: 1800       # Zeeman-style capacity
+  n_inducing: 64             # ABP inducing points
+  
+training:
+  warmup_epochs: 10          # freeze chemistry embedding
+  unfreeze_after: 10         # unfreeze chemistry after warmup
+  lr: 1e-4
+  optimizer: adamw

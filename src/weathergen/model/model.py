@@ -39,6 +39,8 @@ from weathergen.model.utils import get_num_parameters
 from weathergen.utils.distributed import is_root
 from weathergen.utils.utils import get_dtype
 
+from weathergen.model.chemistry_embedding import ChemistryStreamEmbedding
+
 logger = logging.getLogger(__name__)
 
 
@@ -253,6 +255,22 @@ class Model(torch.nn.Module):
         self.sources_size = sources_size
         self.targets_num_channels = targets_num_channels
         self.targets_coords_size = targets_coords_size
+
+        # Chemistry embedding for CAMS data (optional)
+        if hasattr(cf, 'enable_chemistry_embedding') and cf.enable_chemistry_embedding:
+            self.cams_chemistry_embedding = ChemistryStreamEmbedding(
+                n_species=getattr(cf, 'n_cams_species', 50),
+                n_levels=getattr(cf, 'n_levels', 25),
+                n_emissions=getattr(cf, 'n_emissions', 10),
+                spatial_h=getattr(cf, 'spatial_h', 100),
+                spatial_w=getattr(cf, 'spatial_w', 100),
+                d_embedding=getattr(cf, 'd_embedding', 512),
+                d_intermediate=getattr(cf, 'd_intermediate', 1800),
+                n_inducing=getattr(cf, 'n_inducing', 64)
+            )
+        else:
+            self.cams_chemistry_embedding = None
+
 
     #########################################
     def create(self) -> "Model":
@@ -620,7 +638,8 @@ class Model(torch.nn.Module):
         plt.close()
 
     #########################################
-    def forward(self, model_params: ModelParams, batch, forecast_offset: int, forecast_steps: int):
+    def forward(self, model_params: ModelParams, batch, forecast_offset: int, forecast_steps: int, cams_analysis=None):
+
         """Performs the forward pass of the model to generate forecasts
 
         Tokens are processed through the model components, which were defined in the create method.
@@ -647,6 +666,16 @@ class Model(torch.nn.Module):
         tokens, posteriors = self.assimilate_local(model_params, tokens, source_cell_lens)
 
         tokens = self.assimilate_global(model_params, tokens)
+
+        # Add CAMS chemistry embedding if provided
+        if cams_analysis is not None and self.cams_chemistry_embedding is not None:
+            cams_embed = self.cams_chemistry_embedding(cams_analysis)  # (B, d_embed)
+            # Expand to match tokens shape: (B, num_cells * queries, d_embed)
+            B = tokens.shape[0]
+            num_tokens = tokens.shape[1]
+            cams_embed = cams_embed.unsqueeze(1).expand(-1, num_tokens, -1)
+            tokens = tokens + cams_embed
+
 
         if not self.training:
             self.plot_token_distribution(tokens=tokens, fstep=0)
