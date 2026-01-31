@@ -1,5 +1,5 @@
 streams_directory: "./config/streams/cams_eac4_an_era5/"
-start_date: 200301010000
+start_date: 201701010000
 end_date: 202012310000
 start_date_val: 202105310000
 end_date_val: 202205310000
@@ -21,3 +21,14 @@ chemistry_reduction:
 
 len_hrs: 12
 step_hrs: 12
+
+isteps: 0
+lr_max: 0.00005 
+forecast_steps: 3
+num_epochs: 32 
+freeze_modules: ".*global.*|.*local.*|.*adapter.*|.*(ERA5|CAMSANALYSIS|CAMSEAC4).*" 
+fe_layer_norm_after_blocks: [3] 
+impute_latent_noise_std: 0.0001
+
+
+
