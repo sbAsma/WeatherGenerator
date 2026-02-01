@@ -9,7 +9,7 @@
 
 CAMSANALYSIS :
   type : cams
-  filenames : ['cams_analysis_2017_2022.zarr']
+  filenames : ['cams_analysis_2017_2022_extended.zarr']
   source : []
   target : []
   source_exclude : [
