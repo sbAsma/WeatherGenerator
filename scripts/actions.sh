@@ -150,46 +150,10 @@ case "$1" in
     (
       cd "$SCRIPT_DIR" || exit 1
       # This script creates symbolic links to the shared working directories.
-      # 1. Get the path of the private config: WEATHERGEN_PRIVATE_CONF if set
-      #    (e.g. in CI), otherwise inferred from the hostname by platform-env.py
+      # 1. Get the path of the private config of the cluster
       # 2. Read the yaml and extract the path of the shared conf
       # This uses the yq command. It is a python package so uvx (bundled with uv) will donwload and create the right venv
-      # The 'yq' command is used in a separate virtual environment, because the cache
-      # around that tool can get corrupted.
-      # See https://github.com/ecmwf/WeatherGenerator/issues/2298
-      private_conf="${WEATHERGEN_PRIVATE_CONF:-$("$PRIVATE_REPO_PATH"/hpc/platform-env.py hpc-config)}"
-      echo "Private config: $private_conf"
-      export working_dir=$(cat "$private_conf" |
-        UV_CACHE_DIR="$(mktemp -d)" VIRTUAL_ENV=""  uvx yq .path_shared_working_dir)
-      # Remove quotes
-      export working_dir=$(echo "$working_dir" | sed 's/[\"\x27]//g')
-      # If the working directory does not exist, exit with an error
-      if [ ! -d "$working_dir" ]; then
-        echo "Working directory $working_dir does not exist. Please check the configuration."
-        exit 1
-      fi
-      # Ensure the working directory ends with a slash
-      if [[ "$working_dir" != */ ]]; then
-        working_dir="$working_dir/"
-        echo "$working_dir/"
-      fi
-      echo "Working directory: $working_dir"
-      # Create all the links
-      for d in "logs" "models" "output" "plots" "results"
-      do
-        # If the link already exists and points to the correct shared directory, do nothing
-        if [ -e "$d" ]; then
-          if [ -L "$d" ] && [ "$(readlink "$d")" = "$working_dir$d" ]; then
-            echo "'$d' already correctly linked to $working_dir$d, skipping."
-            continue
-          else
-            echo "'$d' exists BUT IS NOT correctly linked to $working_dir$d, PLEASE REMOVE IT MANUALLY."
-            continue
-          fi
-        fi
-        echo "$d -> $working_dir$d"
-        ln -s "$working_dir$d" "$d"
-      done
+      uv run --no-project python scripts/check_symlinks.py
     )
     ;;
   create-jupyter-kernel)
