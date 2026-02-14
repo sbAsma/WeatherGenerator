@@ -429,7 +429,8 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
                             (time_win_target.start, time_win_target.end),
                         )
 
-                        stream_data.add_target(fstep, tt_cells, tc, tt_c, tt_t)
+                        if tt_cells:  # Only add target if not empty
+                            stream_data.add_target(fstep, tt_cells, tc, tt_c, tt_t)
 
                     # merge inputs for sources and targets for current stream
                     streams_data += [stream_data]

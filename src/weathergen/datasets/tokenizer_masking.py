@@ -106,12 +106,9 @@ class TokenizerMasking(Tokenizer):
         tokenize_spacetime = stream_info.get("tokenize_spacetime", False)
         max_num_targets = stream_info.get("max_num_targets", -1)
 
-        target_tokens, target_coords = torch.tensor([]), torch.tensor([])
-        target_tokens_lens = torch.zeros([self.num_healpix_cells_target], dtype=torch.int32)
-
         # target is empty
         if len(self.masker.perm_sel) == 0:
-            return (target_tokens, target_coords, torch.tensor([]), torch.tensor([]))
+            return ([], [], [], [])
 
         # identity function
         def id(arg):
@@ -159,7 +156,7 @@ class TokenizerMasking(Tokenizer):
         target_tokens_lens = [len(t) for t in target_tokens]
 
         if torch.tensor(target_tokens_lens).sum() == 0:
-            return (torch.tensor([]), torch.tensor([]), torch.tensor([]), torch.tensor([]))
+            return ([], [], [], [])
 
         tt_lin = torch.cat(target_tokens)
         tt_lens = target_tokens_lens
@@ -168,6 +165,10 @@ class TokenizerMasking(Tokenizer):
             target_tokens = self.sample_tensors_uniform_vectorized(
                 target_tokens, torch.tensor(tt_lens), max_num_targets
             )
+
+        # Check if sampling reduced target_tokens to empty
+        if not target_tokens or all(len(t) == 0 for t in target_tokens):
+            return ([], [], [], [])
 
         tt_lin = torch.cat(target_tokens)
         target_tokens_lens = [len(t) for t in target_tokens]
@@ -227,7 +228,7 @@ class TokenizerMasking(Tokenizer):
         max_total_points: the maximum number of total points to sample from
         """
         if not tensor_list:
-            return [], 0
+            return []
 
         # Create random permutation
         perm = self.rng.permutation(len(tensor_list))
@@ -238,7 +239,7 @@ class TokenizerMasking(Tokenizer):
         # Find cutoff point
         valid_mask = cumsum <= max_total_points
         if not valid_mask.any():
-            return [], 0
+            return []
 
         num_selected = valid_mask.sum().item()
         perm = torch.tensor(perm)
