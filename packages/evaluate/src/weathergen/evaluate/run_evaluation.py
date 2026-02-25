@@ -49,6 +49,7 @@ from weathergen.metrics.mlflow_utils import (
     log_scores,
     setup_mlflow,
 )
+from weathergen.evaluate.plotting.cams_comparison_plotter import plot_cams_wg_comparison
 
 _DEFAULT_PLOT_DIR = _REPO_ROOT / "plots"
 
@@ -227,12 +228,15 @@ def _process_stream(
 
     # Parallel plotting
     if stream_dict.get("plotting") and type_ == "zarr":
+        _logger.info(f"Starting plotting for {run_id} - {stream}")
         plot_data(reader, stream, global_plotting_opts)
+        _logger.info(f"Finished plotting for {run_id} - {stream}")
 
     # Scoring per stream
     if not stream_dict.get("evaluation"):
         return run_id, stream, {}
 
+    _logger.info(f"Starting scoring for {run_id} - {stream}")
     stream_loaded_scores, recomputable_metrics = reader.load_scores(
         stream,
         regions,
@@ -246,9 +250,11 @@ def _process_stream(
         )
         metrics_to_compute = recomputable_metrics if recomputable_metrics else metrics
 
+        _logger.info(f"Computing scores for {run_id} - {stream} - regions: {regions_to_compute} - metrics: {metrics_to_compute}")
         stream_computed_scores = calc_scores_per_stream(
             reader, stream, regions_to_compute, metrics_to_compute, plot_score_maps
         )
+        _logger.info(f"Finished computing scores for {run_id} - {stream}")
         metric_list_to_json(reader, stream, stream_computed_scores, regions)
         scores_dict = merge(stream_loaded_scores, stream_computed_scores)
 
@@ -384,6 +390,10 @@ def evaluate_from_config(
     if scores_dict:
         _logger.info("Started creating summary plots...")
         plot_summary(cfg, scores_dict, summary_dir)
+
+    if cfg.evaluation.get("plot_cams_forecast_comparison", False):
+        for run_id, run in runs.items():
+            plot_cams_wg_comparison(run, run_id, cfg.evaluation, cfg.evaluation.get("cams_forecast_steps", []))
 
 
 if __name__ == "__main__":
