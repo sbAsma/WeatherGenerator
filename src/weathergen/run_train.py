@@ -63,15 +63,30 @@ def main(argl: list[str]):
 
 def _fix_argl(argl):  # TODO remove this fix after grace period
     """Ensure `stage` positional argument is in arglist."""
-    if argl[0] not in cli.Stage:
+    # If no arguments or the first argument looks like an option, we assume the
+    # stage positional was omitted. Also treat unknown first token as missing.
+    stage_values = [s for s in cli.Stage]
+    first = argl[0] if argl else None
+    missing_stage = False
+    if not first:
+        missing_stage = True
+    elif isinstance(first, str) and first.startswith("-"):
+        missing_stage = True
+    else:
         try:
-            stage = os.environ.get("WEATHERGEN_STAGE")
-        except KeyError as e:
-            msg = (
-                "`stage` postional argument and environment variable 'WEATHERGEN_STAGE' missing.",
-                "Provide either one or the other.",
+            # membership check for StrEnum
+            if first not in stage_values:
+                missing_stage = True
+        except Exception:
+            missing_stage = True
+
+    if missing_stage:
+        stage = os.environ.get("WEATHERGEN_STAGE")
+        if not stage:
+            raise ValueError(
+                "`stage` positional argument missing and environment variable 'WEATHERGEN_STAGE' is not set."
+                " Provide either a positional stage (train|train_continue|inference) or set WEATHERGEN_STAGE."
             )
-            raise ValueError(msg) from e
 
         argl = [stage] + argl
 

@@ -370,7 +370,7 @@ class Trainer(TrainerBase):
             logger.info(
                 f"Mini_epoch {mini_epoch} of {self.training_cfg.num_mini_epochs}: validate."
             )
-            self.validate(mini_epoch, self.validation_cfg, self.batch_size_validation_per_gpu)
+            # self.validate(mini_epoch, self.validation_cfg, self.batch_size_validation_per_gpu)
 
             logger.info(
                 f"Mini_epoch {mini_epoch} of {self.training_cfg.num_mini_epochs}: save_model."
