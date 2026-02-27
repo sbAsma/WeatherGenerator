@@ -7,8 +7,11 @@
 # granted to it by virtue of its status as an intergovernmental organisation
 # nor does it submit to any jurisdiction.
 
+import dataclasses
+
 import torch
 import torch.nn as nn
+from omegaconf import OmegaConf
 from torch.utils.checkpoint import checkpoint
 
 from weathergen.common.config import Config
@@ -42,117 +45,86 @@ class EmbeddingEngine(torch.nn.Module):
         """
         super(EmbeddingEngine, self).__init__()
         self.cf = cf
-        self.sources_size = sources_size  # ✅ Add this line BEFORE using it
+        self.dtype = get_dtype(self.cf.mixed_precision_dtype)
+        self.sources_size = sources_size
         self.chemistry_embedding = chemistry_embedding
+        self.embeds = torch.nn.ModuleDict()
+        self.stream_names = [str(stream_cfg["name"]) for stream_cfg in cf.streams]
 
-        # Build standard embeddings for all streams
-        self.embeds = torch.nn.ModuleList()
-        for i_obs, si in enumerate(cf.streams):
-            stream_name = si.get("name", f"stream_{i_obs}")
-
-            if si.get("diagnostic", False) or self.sources_size[i_obs] == 0:
-                self.embeds.append(torch.nn.Identity())
+        for i, (si, stream_name) in enumerate(zip(self.cf.streams, self.stream_names, strict=True)):
+            if si.get("diagnostic", False) or self.sources_size[i] == 0:
+                self.embeds[stream_name] = torch.nn.Identity()
                 continue
 
             if si["embed"]["net"] == "transformer":
-                self.embeds.append(
-                    StreamEmbedTransformer(
-                        mode=self.cf.embed_orientation,
-                        num_tokens=si["embed"]["num_tokens"],
-                        token_size=si["token_size"],
-                        num_channels=self.sources_size[i_obs],
-                        dim_embed=si["embed"]["dim_embed"],
-                        dim_out=self.cf.ae_local_dim_embed,
-                        num_blocks=si["embed"]["num_blocks"],
-                        num_heads=si["embed"]["num_heads"],
-                        dropout_rate=self.cf.embed_dropout_rate,
-                        norm_type=self.cf.norm_type,
-                        embed_size_centroids=self.cf.embed_size_centroids,
-                        unembed_mode=self.cf.embed_unembed_mode,
-                        stream_name=stream_name,
-                    )
+                self.embeds[stream_name] = StreamEmbedTransformer(
+                    mode=self.cf.embed_orientation,
+                    num_tokens=si["embed"]["num_tokens"],
+                    token_size=si["token_size"],
+                    num_channels=self.sources_size[i],
+                    dim_embed=si["embed"]["dim_embed"],
+                    dim_out=self.cf.ae_local_dim_embed,
+                    num_blocks=si["embed"]["num_blocks"],
+                    num_heads=si["embed"]["num_heads"],
+                    dropout_rate=self.cf.embed_dropout_rate,
+                    norm_type=self.cf.norm_type,
+                    unembed_mode=self.cf.embed_unembed_mode,
+                    stream_name=stream_name,
                 )
             elif si["embed"]["net"] == "linear":
-                self.embeds.append(
-                    StreamEmbedLinear(
-                        self.sources_size[i_obs] * si["token_size"],
-                        self.cf.ae_local_dim_embed,
-                        stream_name=stream_name,
-                    )
+                self.embeds[stream_name] = StreamEmbedLinear(
+                    self.sources_size[i] * si["token_size"],
+                    self.cf.ae_local_dim_embed,
+                    stream_name=stream_name,
                 )
             else:
                 raise ValueError("Unsupported embedding network type")
 
-    def forward(self, streams_data, pe_embed, dtype, device):
-        tokens_all = []
+    def forward(self, batch, pe_embed):
+        num_steps_input = batch.get_num_steps()
 
-        for i_stream, stream_info in enumerate(self.cf.streams):
-            stream_name = stream_info.get("name", f"stream_{i_stream}")
-            
-            # Check if this stream should use chemistry embedding
-            target_streams = []
-            if hasattr(self.cf, 'chemistry_reduction') and hasattr(self.cf.chemistry_reduction, 'target_streams'):
-                target_streams = self.cf.chemistry_reduction.target_streams
-            
-            if (stream_name in target_streams and 
-                self.chemistry_embedding is not None):
-                
-                # Apply ABP to CAMS data
-                batch_tokens = []
-                for sb in streams_data:
-                    # Extract chemistry data from the batch
-                    s = sb[i_stream]
-                    
-                    if not s.source_empty():
-                        # For CAMS chemistry streams, source_tokens_cells has shape:
-                        # (n_cells, token_size, n_channels) or (n_cells, H, W, C)
-                        chem_data = s.source_tokens_cells
-                        
-                        # Move to correct device and dtype
-                        chem_data = chem_data.to(device=device, dtype=dtype)
-                        
-                        # Flatten cells: (n_cells, ...) -> process each cell
-                        n_cells = chem_data.shape[0]
-                        
-                        # Reshape to (n_cells, H, W, C_in) if needed
-                        # Then apply ABP to each cell's data
-                        if chem_data.dim() == 4:
-                            # Already (n_cells, H, W, C)
-                            chem_embed = self.chemistry_embedding(chem_data)  # (n_cells, d_embedding)
-                        elif chem_data.dim() == 3:
-                            # (n_cells, token_size, n_channels) - need to reshape
-                            # For now, treat each cell's data as batch
-                            chem_embed = self.chemistry_embedding(chem_data.unsqueeze(1))  # Add spatial dim
-                        else:
-                            raise ValueError(f"Unexpected chem_data shape: {chem_data.shape}")
-                        
-                        batch_tokens.append(chem_embed)
-                
-                if batch_tokens:
-                    tokens = torch.cat(batch_tokens, dim=0)  # (total_cells, d_embedding)
-                else:
-                    tokens = torch.empty((0, self.cf.ae_local_dim_embed), dtype=dtype, device=device)
-            else:
-                # Use standard embedding - ORIGINAL PATTERN
-                # Loop through batch items and call embed with only source_tokens_cells and source_centroids
-                embed = self.embeds[i_stream]
-                batch_tokens = []
-                for sb in streams_data:  # Loop over batch
-                    s = sb[i_stream]  # Get StreamData for this stream
-                    if not s.source_empty():
-                        # Original calling pattern: embed(source_tokens_cells, source_centroids)
-                        x_embed = embed(s.source_tokens_cells, s.source_centroids).flatten(0, 1)
-                        batch_tokens.append(x_embed)
-                
-                if batch_tokens:
-                    tokens = torch.cat(batch_tokens, dim=0)
-                else:
-                    # Handle empty case
-                    tokens = torch.empty((0, self.cf.ae_local_dim_embed), dtype=dtype, device=device)
-            
-            tokens_all.append(tokens)
+        num_tokens = torch.sum(batch.tokens_lens, 2).flatten().sum().item()
+        tokens_all = torch.empty(
+            (num_tokens, self.cf.ae_local_dim_embed), dtype=self.dtype, device=batch.get_device()
+        )
 
-        return torch.cat(tokens_all, dim=0)
+        # iterate over all streams
+        x_embeds = []
+        for stream_name in self.stream_names:
+            # collect all source tokens from all input_steps and all samples in the batch
+            sdata = []
+            for istep in range(num_steps_input):
+                for sample in batch.get_samples():
+                    sdata += [sample.streams_data[stream_name].source_tokens_cells[istep]]
+
+            sdata = torch.cat(sdata).to(tokens_all.dtype)
+            # skip empty stream
+            if len(sdata) == 0:
+                continue
+
+            # embedding from physical space to per patch latent representation
+            x_embeds += [self.embeds[stream_name](sdata).flatten(0, 1)]
+
+        # switch from stream to cell-based ordering and apply per cell positional encoding
+
+        # computer scatter index across batch items and input steps
+        tok_counts = batch.tokens_lens.permute([2, 0, 1, 3]).flatten()
+        repeat = torch.repeat_interleave
+        scatter_idxs = repeat(
+            torch.ones(len(tok_counts), dtype=torch.int64, device=tok_counts.device), tok_counts
+        )
+        scatter_idxs = scatter_idxs.cumsum(0) - 1
+        # scatter index must exist for each element and not just per row
+        scatter_idxs = scatter_idxs.unsqueeze(1).repeat((1, self.cf.ae_local_dim_embed))
+
+        # per cell indices into positional encoding
+        tok_counts = batch.tokens_lens.permute([2, 0, 1, 3]).sum(0).flatten()
+        pe_idxs = torch.cat([torch.arange(c) for c in tok_counts])
+
+        # actual scatter operation
+        tokens_all.scatter_(0, scatter_idxs, torch.cat(x_embeds) + pe_embed[pe_idxs])
+
+        return tokens_all
 
 
 class LocalAssimilationEngine(torch.nn.Module):
@@ -194,7 +166,7 @@ class LocalAssimilationEngine(torch.nn.Module):
 
     def forward(self, tokens_c, cell_lens_c, use_reentrant):
         for block in self.ae_local_blocks:
-            tokens_c = checkpoint(block, tokens_c, cell_lens_c, use_reentrant=use_reentrant)
+            tokens_c = block(tokens_c, cell_lens_c)
         return tokens_c
 
 
@@ -227,44 +199,121 @@ class Local2GlobalAssimilationEngine(torch.nn.Module):
                 attention_dtype=get_dtype(self.cf.attention_dtype),
             )
         )
-        self.ae_adapter.append(
-            MLP(
-                self.cf.ae_global_dim_embed,
-                self.cf.ae_global_dim_embed,
-                with_residual=True,
-                dropout_rate=self.cf.ae_adapter_dropout_rate,
-                norm_type=self.cf.norm_type,
-                norm_eps=self.cf.mlp_norm_eps,
-            )
-        )
-        self.ae_adapter.append(
-            MultiCrossAttentionHeadVarlenSlicedQ(
-                self.cf.ae_global_dim_embed,
-                self.cf.ae_local_dim_embed,
-                num_slices_q=self.cf.ae_local_num_queries,
-                dim_head_proj=self.cf.ae_adapter_embed,
-                num_heads=self.cf.ae_adapter_num_heads,
-                with_residual=self.cf.ae_adapter_with_residual,
-                with_qk_lnorm=self.cf.ae_adapter_with_qk_lnorm,
-                dropout_rate=self.cf.ae_adapter_dropout_rate,
-                with_flash=self.cf.with_flash_attention,
-                norm_type=self.cf.norm_type,
-                norm_eps=self.cf.norm_eps,
-                attention_dtype=get_dtype(self.cf.attention_dtype),
-            )
-        )
 
-    def forward(self, tokens_c, tokens_global_c, q_cells_lens_c, cell_lens_c, use_reentrant):
+        ae_adapter_num_blocks = cf.get("ae_adapter_num_blocks", 2)
+        for _ in range(ae_adapter_num_blocks - 1):
+            self.ae_adapter.append(
+                MLP(
+                    self.cf.ae_global_dim_embed,
+                    self.cf.ae_global_dim_embed,
+                    with_residual=True,
+                    dropout_rate=self.cf.ae_adapter_dropout_rate,
+                    norm_type=self.cf.norm_type,
+                    norm_eps=self.cf.mlp_norm_eps,
+                )
+            )
+            self.ae_adapter.append(
+                MultiCrossAttentionHeadVarlenSlicedQ(
+                    self.cf.ae_global_dim_embed,
+                    self.cf.ae_local_dim_embed,
+                    num_slices_q=self.cf.ae_local_num_queries,
+                    dim_head_proj=self.cf.ae_adapter_embed,
+                    num_heads=self.cf.ae_adapter_num_heads,
+                    with_residual=self.cf.ae_adapter_with_residual,
+                    with_qk_lnorm=self.cf.ae_adapter_with_qk_lnorm,
+                    dropout_rate=self.cf.ae_adapter_dropout_rate,
+                    with_flash=self.cf.with_flash_attention,
+                    norm_type=self.cf.norm_type,
+                    norm_eps=self.cf.norm_eps,
+                    attention_dtype=get_dtype(self.cf.attention_dtype),
+                )
+            )
+
+    def forward(self, tokens_c, tokens_global_c, q_cells_lens_c, cell_lens_c):
         for block in self.ae_adapter:
-            tokens_global_c = checkpoint(
-                block,
+            tokens_global_c = block(
                 tokens_global_c,
                 tokens_c,
                 q_cells_lens_c,
                 cell_lens_c,
-                use_reentrant=use_reentrant,
             )
         return tokens_global_c
+
+
+class QueryAggregationEngine(torch.nn.Module):
+    name: "QueryAggregationEngine"
+
+    def __init__(self, cf: Config, num_healpix_cells: int) -> None:
+        """
+        Initialize the QueryAggregationEngine with the configuration.
+
+        This engine is used for aggregating information from all query tokens coming
+        from healpix cells, that are not masked.
+
+        :param cf: Configuration object containing parameters for the engine.
+        :param num_healpix_cells: Number of healpix cells used for local queries.
+        """
+        super(QueryAggregationEngine, self).__init__()
+        self.cf = cf
+        self.num_healpix_cells = num_healpix_cells
+
+        self.ae_aggregation_blocks = torch.nn.ModuleList()
+
+        global_rate = int(1 / self.cf.ae_aggregation_att_dense_rate)
+        for i in range(self.cf.ae_aggregation_num_blocks):
+            ## Alternate between local and global attention
+            #  as controlled by cf.ae_dense_local_att_dense_rate
+            # Last block is always global attention
+            if i % global_rate == 0 or i + 1 == self.cf.ae_aggregation_num_blocks:
+                self.ae_aggregation_blocks.append(
+                    MultiSelfAttentionHeadVarlen(
+                        self.cf.ae_global_dim_embed,
+                        num_heads=self.cf.ae_aggregation_num_heads,
+                        dropout_rate=self.cf.ae_aggregation_dropout_rate,
+                        with_qk_lnorm=self.cf.ae_aggregation_with_qk_lnorm,
+                        with_flash=self.cf.with_flash_attention,
+                        norm_type=self.cf.norm_type,
+                        norm_eps=self.cf.norm_eps,
+                        attention_dtype=get_dtype(self.cf.attention_dtype),
+                    )
+                )
+            else:
+                assert False, "Incompatible with batchsize > 1 here"
+                self.ae_aggregation_blocks.append(
+                    MultiSelfAttentionHeadLocal(
+                        self.cf.ae_global_dim_embed,
+                        num_heads=self.cf.ae_aggregation_num_heads,
+                        qkv_len=self.num_healpix_cells * self.cf.ae_local_num_queries,
+                        block_factor=self.cf.ae_aggregation_block_factor,
+                        dropout_rate=self.cf.ae_aggregation_dropout_rate,
+                        with_qk_lnorm=self.cf.ae_aggregation_with_qk_lnorm,
+                        with_flash=self.cf.with_flash_attention,
+                        norm_type=self.cf.norm_type,
+                        norm_eps=self.cf.norm_eps,
+                        attention_dtype=get_dtype(self.cf.attention_dtype),
+                    )
+                )
+            # MLP block
+            self.ae_aggregation_blocks.append(
+                MLP(
+                    self.cf.ae_global_dim_embed,
+                    self.cf.ae_global_dim_embed,
+                    with_residual=True,
+                    dropout_rate=self.cf.ae_aggregation_dropout_rate,
+                    hidden_factor=self.cf.ae_aggregation_mlp_hidden_factor,
+                    norm_type=self.cf.norm_type,
+                    norm_eps=self.cf.mlp_norm_eps,
+                )
+            )
+
+    def forward(self, tokens, batch_lens, use_reentrant, coords=None):
+        for block in self.ae_aggregation_blocks:
+            aux_info = None
+            if isinstance(block, MultiSelfAttentionHeadVarlen):
+                tokens = block(tokens, x_lens=batch_lens)
+            else:
+                tokens = block(tokens, coords, aux_info)
+        return tokens
 
 
 class GlobalAssimilationEngine(torch.nn.Module):
@@ -299,6 +348,7 @@ class GlobalAssimilationEngine(torch.nn.Module):
                         norm_type=self.cf.norm_type,
                         norm_eps=self.cf.norm_eps,
                         attention_dtype=get_dtype(self.cf.attention_dtype),
+                        with_2d_rope=self.cf.get("rope_2D", False),
                     )
                 )
             else:
@@ -314,6 +364,7 @@ class GlobalAssimilationEngine(torch.nn.Module):
                         norm_type=self.cf.norm_type,
                         norm_eps=self.cf.norm_eps,
                         attention_dtype=get_dtype(self.cf.attention_dtype),
+                        with_2d_rope=self.cf.get("rope_2D", False),
                     )
                 )
             # MLP block
@@ -333,16 +384,17 @@ class GlobalAssimilationEngine(torch.nn.Module):
                 torch.nn.LayerNorm(self.cf.ae_global_dim_embed, elementwise_affine=False)
             )
 
-    def forward(self, tokens, use_reentrant):
+    def forward(self, tokens, coords=None):
+        aux_info = None
         for block in self.ae_global_blocks:
-            tokens = checkpoint(block, tokens, use_reentrant=use_reentrant)
+            tokens = block(tokens, coords, aux_info)
         return tokens
 
 
 class ForecastingEngine(torch.nn.Module):
     name: "ForecastingEngine"
 
-    def __init__(self, cf: Config, num_healpix_cells: int, dim_aux: int = None) -> None:
+    def __init__(self, cf: Config, mode_cfg, num_healpix_cells: int, dim_aux: int = None) -> None:
         """
         Initialize the ForecastingEngine with the configuration.
 
@@ -355,7 +407,7 @@ class ForecastingEngine(torch.nn.Module):
         self.fe_blocks = torch.nn.ModuleList()
 
         global_rate = int(1 / self.cf.forecast_att_dense_rate)
-        if self.cf.forecast_policy is not None:
+        if mode_cfg.get("forecast", {}).get("policy") is not None:
             for i in range(self.cf.fe_num_blocks):
                 # Alternate between global and local attention
                 if (i % global_rate == 0) or i + 1 == self.cf.ae_global_num_blocks:
@@ -370,6 +422,7 @@ class ForecastingEngine(torch.nn.Module):
                             dim_aux=dim_aux,
                             norm_eps=self.cf.norm_eps,
                             attention_dtype=get_dtype(self.cf.attention_dtype),
+                            with_2d_rope=self.cf.get("rope_2D", False),
                         )
                     )
                 else:
@@ -386,6 +439,7 @@ class ForecastingEngine(torch.nn.Module):
                             dim_aux=dim_aux,
                             norm_eps=self.cf.norm_eps,
                             attention_dtype=get_dtype(self.cf.attention_dtype),
+                            with_2d_rope=self.cf.get("rope_2D", False),
                         )
                     )
                 # Add MLP block
@@ -415,13 +469,19 @@ class ForecastingEngine(torch.nn.Module):
         for block in self.fe_blocks:
             block.apply(init_weights_final)
 
-    def forward(self, tokens, fstep):
+    def forward(self, tokens, fstep, coords=None):
+        if self.training:
+            # Impute noise to the latent state
+            noise_std = self.cf.get("fe_impute_latent_noise_std", 0.0)
+            if noise_std > 0.0:
+                tokens = tokens + torch.randn_like(tokens) * torch.norm(tokens) * noise_std
+
         aux_info = None
-        for b_idx, block in enumerate(self.fe_blocks):
+        for _b_idx, block in enumerate(self.fe_blocks):
             if isinstance(block, torch.nn.modules.normalization.LayerNorm):
                 tokens = block(tokens)
             else:
-                tokens = checkpoint(block, tokens, aux_info, use_reentrant=False)
+                tokens = checkpoint(block, tokens, coords, aux_info, use_reentrant=False)
         return tokens
 
 
@@ -489,7 +549,6 @@ class TargetPredictionEngineClassic(nn.Module):
         tr_dim_head_proj,
         tr_mlp_hidden_factor,
         softcap,
-        tro_type,
         stream_name: str,
     ):
         """
@@ -501,7 +560,6 @@ class TargetPredictionEngineClassic(nn.Module):
         :param tr_dim_head_proj: Dimension for head projection.
         :param tr_mlp_hidden_factor: Hidden factor for the MLP layers.
         :param softcap: Softcap value for the attention layers.
-        :param tro_type: Type of target readout (e.g., "obs_value").
         """
         super(TargetPredictionEngineClassic, self).__init__()
         self.name = f"TargetPredictionEngine_{stream_name}"
@@ -512,7 +570,6 @@ class TargetPredictionEngineClassic(nn.Module):
         self.tr_dim_head_proj = tr_dim_head_proj
         self.tr_mlp_hidden_factor = tr_mlp_hidden_factor
         self.softcap = softcap
-        self.tro_type = tro_type
         self.tte = torch.nn.ModuleList()
 
         for i in range(len(self.dims_embed) - 1):
@@ -556,7 +613,7 @@ class TargetPredictionEngineClassic(nn.Module):
                 MLP(
                     self.dims_embed[i],
                     self.dims_embed[i + 1],
-                    with_residual=(self.cf.pred_dyadic_dims or self.tro_type == "obs_value"),
+                    with_residual=True,
                     hidden_factor=self.tr_mlp_hidden_factor,
                     dropout_rate=0.1,  # Assuming dropout_rate is 0.1
                     norm_type=self.cf.norm_type,
@@ -574,16 +631,14 @@ class TargetPredictionEngineClassic(nn.Module):
 
         for ib, block in enumerate(self.tte):
             if self.cf.pred_self_attention and ib % 3 == 1:
-                tc_tokens = checkpoint(block, tc_tokens, tcs_lens, tcs_aux, use_reentrant=False)
+                tc_tokens = block(tc_tokens, tcs_lens, tcs_aux)
             else:
-                tc_tokens = checkpoint(
-                    block,
+                tc_tokens = block(
                     tc_tokens,
                     tokens_stream,
                     tcs_lens,
                     tokens_lens,
                     tcs_aux,
-                    use_reentrant=False,
                 )
         return tc_tokens
 
@@ -597,7 +652,6 @@ class TargetPredictionEngine(nn.Module):
         tr_dim_head_proj,
         tr_mlp_hidden_factor,
         softcap,
-        tro_type,
         stream_name: str,
     ):
         """
@@ -609,7 +663,6 @@ class TargetPredictionEngine(nn.Module):
         :param tr_dim_head_proj: Dimension for head projection.
         :param tr_mlp_hidden_factor: Hidden factor for the MLP layers.
         :param softcap: Softcap value for the attention layers.
-        :param tro_type: Type of target readout (e.g., "obs_value").
 
         the decoder_type decides the how the conditioning is done
 
@@ -630,10 +683,8 @@ class TargetPredictionEngine(nn.Module):
         self.tr_dim_head_proj = tr_dim_head_proj
         self.tr_mlp_hidden_factor = tr_mlp_hidden_factor
         self.softcap = softcap
-        self.tro_type = tro_type
 
         # For backwards compatibility
-        from omegaconf import OmegaConf
 
         self.cf = OmegaConf.merge(
             OmegaConf.create({"decoder_type": "PerceiverIOCoordConditioning"}), self.cf
@@ -723,7 +774,6 @@ class TargetPredictionEngine(nn.Module):
                         attention_kwargs=attention_kwargs,
                         tr_dim_head_proj=tr_dim_head_proj,
                         tr_mlp_hidden_factor=tr_mlp_hidden_factor,
-                        tro_type=tro_type,
                         mlp_norm_eps=self.cf.mlp_norm_eps,
                     )
                 )
@@ -773,3 +823,154 @@ class TargetPredictionEngine(nn.Module):
             else output
         )
         return output
+
+
+@dataclasses.dataclass
+class LatentState:
+    """
+    A dataclass to encapsulate the latent state aka the intput to latent heads.
+    """
+
+    class_token: torch.Tensor
+    register_tokens: torch.Tensor
+    patch_tokens: torch.Tensor
+    z_pre_norm: torch.Tensor
+
+
+class LatentPredictionHeadTransformer(nn.Module):
+    def __init__(
+        self,
+        cf: Config,
+        name: str,
+        in_dim: int,
+        loss_conf,
+        use_class_token: bool,
+        use_patch_token: bool,
+    ):
+        super().__init__()
+
+        self.name = name
+
+        out_dim, num_blocks, num_heads, with_qk_lnorm, intermediate_dim, dropout_rate = (
+            loss_conf["out_dim"],
+            loss_conf["num_blocks"],
+            loss_conf["num_heads"],
+            loss_conf["with_qk_lnorm"],
+            loss_conf["intermediate_dim"],
+            loss_conf["dropout_rate"],
+        )
+
+        self.global_cf = cf
+        self.use_class_token = use_class_token
+        self.use_patch_token = use_patch_token
+
+        self.blocks = nn.ModuleList()
+
+        # first map to intermediate_dim to introduce a bottleneck
+        self.blocks.append(nn.Linear(in_dim, intermediate_dim, bias=False))
+
+        for _ in range(num_blocks):
+            self.blocks.append(
+                MultiSelfAttentionHead(
+                    intermediate_dim,
+                    num_heads=num_heads,
+                    dropout_rate=dropout_rate,
+                    with_qk_lnorm=with_qk_lnorm,
+                    with_flash=self.global_cf.with_flash_attention,
+                    norm_type=self.global_cf.norm_type,
+                    # dim_aux=dim_aux,
+                    norm_eps=self.global_cf.norm_eps,
+                    attention_dtype=get_dtype(self.global_cf.attention_dtype),
+                )
+            )
+            # Add MLP block
+            self.blocks.append(
+                MLP(
+                    intermediate_dim,
+                    intermediate_dim,
+                    hidden_factor=4,
+                    with_residual=True,
+                    dropout_rate=dropout_rate,
+                    norm_type=self.global_cf.norm_type,
+                    # dim_aux=dim_aux,
+                    norm_eps=self.global_cf.mlp_norm_eps,
+                )
+            )
+
+        # finally map from intermediate_dim to the out_dim
+        self.blocks.append(nn.Linear(intermediate_dim, out_dim, bias=False))
+
+    def forward(self, x: LatentState):
+        # we concatenate the patch and class tokens to process them together
+        # We concatenate in the token dimension [Batch, Tokens, Dim]
+        patch_class_tokens = []
+        if self.use_class_token:
+            patch_class_tokens.append(x.class_token)
+        if self.use_patch_token:
+            patch_class_tokens.append(x.patch_tokens)
+        patch_class_tokens = torch.cat(patch_class_tokens, dim=1)
+
+        for _b_idx, block in enumerate(self.blocks):
+            if isinstance(block, torch.nn.modules.normalization.LayerNorm):
+                patch_class_tokens = block(patch_class_tokens)
+            else:
+                patch_class_tokens = checkpoint(block, patch_class_tokens, use_reentrant=False)
+        return patch_class_tokens
+
+
+class LatentPredictionHeadIdentity(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def reset_parameters(self):
+        return
+
+    def forward(self, x: LatentState):
+        return x.patch_tokens
+
+
+class LatentPredictionHeadMLP(nn.Module):
+    def __init__(self, name, in_dim: int, loss_conf, use_class_token: bool, use_patch_token: bool):
+        super().__init__()
+
+        self.name = name
+
+        out_dim, num_layers, hidden_factor = (
+            loss_conf["out_dim"],
+            loss_conf["num_layers"],
+            loss_conf["hidden_factor"],
+        )
+
+        self.use_class_token = use_class_token
+        self.use_patch_token = use_patch_token
+
+        # Create an MLP block
+        self.blocks = MLP(in_dim, out_dim, num_layers, hidden_factor)
+
+    def forward(self, x: LatentState):
+        outputs = []
+        if self.use_class_token:
+            outputs.append(self.blocks(x.class_token))
+        if self.use_patch_token:
+            outputs.append(self.blocks(x.patch_tokens))
+
+        return torch.cat(outputs, dim=1)
+
+
+class BilinearDecoder(nn.Module):
+    def __init__(self, stream_name, coord_dim, latent_dim, out_dim):
+        super().__init__()
+
+        self.name = f"BilinearDecoder_{stream_name}"
+        self.latent_dim = latent_dim
+        self.bilin = nn.Bilinear(coord_dim, latent_dim, out_dim, bias=False)
+
+    def forward(self, coords_md, latent_nd, tcs_lens_n1):
+        """
+        Using Noam Shazeer notation
+        N = Number of latent tokens*batch_size (N1 means N+1)
+        M = Number of coordinates to decode
+        D = Hidden dimension
+        """
+        latent_md = torch.repeat_interleave(latent_nd, tcs_lens_n1[1:], 0)
+        return self.bilin(coords_md, latent_md)

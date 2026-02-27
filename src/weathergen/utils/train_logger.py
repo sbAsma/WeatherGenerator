@@ -13,15 +13,19 @@ import logging
 import math
 import time
 import traceback
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
 
 import numpy as np
 import polars as pl
-from torch import Tensor
+import torch
 
 import weathergen.common.config as config
+
+# from weathergen.train.trainer import cfg_keys_to_filter
+from weathergen.train.utils import Stage, cfg_keys_to_filter, flatten_dict, get_active_stage_config
+from weathergen.utils.distributed import ddp_average
 from weathergen.utils.metrics import get_train_metrics_path, read_metrics_file
 
 _weathergen_timestamp = "weathergen.timestamp"
@@ -32,12 +36,7 @@ _performance_memory = "perf.memory"
 
 _logger = logging.getLogger(__name__)
 
-Stage = Literal["train", "val"]
 RunId = str
-
-# All the stages currently implemented:
-TRAIN: Stage = "train"
-VAL: Stage = "val"
 
 
 @dataclass
@@ -88,138 +87,73 @@ class TrainLogger:
         # but we can probably do better and rely for example on the logging module.
 
         metrics_path = get_train_metrics_path(
-            base_path=Path(self.cf.run_path), run_id=self.cf.run_id
+            base_path=config.get_path_run(self.cf), run_id=self.cf.general.run_id
         )
         with open(metrics_path, "ab") as f:
             s = json.dumps(clean_metrics) + "\n"
             f.write(s.encode("utf-8"))
 
     #######################################
-    def add_train(
+    def add_logs(
         self,
+        stage: Stage,
         samples: int,
-        lr: float,
-        avg_loss: Tensor,
-        losses_all: dict[str, Tensor],
-        stddev_all: dict[str, Tensor],
+        losses_all: dict,
+        stddev_all: dict,
+        avg_loss: list[float] = None,
+        lr: float = None,
         perf_gpu: float = 0.0,
         perf_mem: float = 0.0,
     ) -> None:
         """
-        Log training data
+        Log training or validation data
         """
         metrics: dict[str, float] = dict(num_samples=samples)
 
-        log_vals: list[float] = [int(datetime.datetime.now().strftime("%Y%m%d%H%M%S"))]
-        log_vals += [samples]
+        if stage == "train":
+            metrics["loss_avg_mean"] = np.nanmean(avg_loss)
+            metrics["learning_rate"] = lr
+            metrics["num_samples"] = int(samples)
+            metrics[_performance_gpu] = perf_gpu
+            metrics[_performance_memory] = perf_mem
 
-        metrics["loss_avg_mean"] = avg_loss.nanmean().item()
-        metrics["learning_rate"] = lr
-        metrics["num_samples"] = int(samples)
-        log_vals += [avg_loss.nanmean().item()]
-        log_vals += [lr]
+        for key, value in losses_all.items():
+            metrics[key] = np.nanmean(value)
 
-        for st in self.cf.streams:
-            loss = losses_all[st["name"]]
-            stddev = stddev_all[st["name"]]
+        for key, value in stddev_all.items():
+            metrics[key] = np.nanmean(value)
 
-            for j, (lf_name, _) in enumerate(self.cf.loss_fcts):
-                metrics[_key_loss(st["name"], lf_name)] = loss[:, :, j].nanmean().item()
-
-                for k, ch_n in enumerate(st.train_target_channels):
-                    metrics[_key_loss_chn(st["name"], lf_name, ch_n)] = (
-                        loss[:, k, j].nanmean().item()
-                    )
-                log_vals += [loss[:, :, j].nanmean().item()]
-
-            metrics[_key_stddev(st["name"])] = stddev.nanmean().item()
-
-            log_vals += [stddev.nanmean().item()]
-
-        with open(self.path_run / f"{self.cf.run_id}_train_log.txt", "ab") as f:
-            np.savetxt(f, log_vals)
-
-        log_vals = []
-        log_vals += [perf_gpu]
-        log_vals += [perf_mem]
-        metrics[_performance_gpu] = perf_gpu
-        metrics[_performance_memory] = perf_mem
-        self.log_metrics("train", metrics)
-        with open(self.path_run / (self.cf.run_id + "_perf_log.txt"), "ab") as f:
-            np.savetxt(f, log_vals)
-
-    #######################################
-    def add_val(
-        self, samples: int, losses_all: dict[str, Tensor], stddev_all: dict[str, Tensor]
-    ) -> None:
-        """
-        Log validation data
-        """
-
-        metrics: dict[str, float] = dict(num_samples=int(samples))
-
-        log_vals: list[float] = [int(datetime.datetime.now().strftime("%Y%m%d%H%M%S"))]
-        log_vals += [samples]
-
-        for st in self.cf.streams:
-            loss = losses_all[st["name"]]
-            stddev = stddev_all[st["name"]]
-            for j, (lf_name, _) in enumerate(self.cf.loss_fcts_val):
-                metrics[_key_loss(st["name"], lf_name)] = loss[:, :, j].nanmean().item()
-                for k, ch_n in enumerate(st.val_target_channels):
-                    metrics[_key_loss_chn(st["name"], lf_name, ch_n)] = (
-                        loss[:, k, j].nanmean().item()
-                    )
-                log_vals += [loss[:, :, j].nanmean().item()]
-
-            metrics[_key_stddev(st["name"])] = stddev.nanmean().item()
-            log_vals += [stddev.nanmean().item()]
-
-        self.log_metrics("val", metrics)
-        with open(self.path_run / (self.cf.run_id + "_val_log.txt"), "ab") as f:
-            np.savetxt(f, log_vals)
+        self.log_metrics(stage, metrics)
 
     #######################################
     @staticmethod
-    def read(run_id: str, model_path: str = None, mini_epoch: int = -1) -> Metrics:
+    def read(run_id: str, model_path: str = None, mini_epoch: int | None = None) -> Metrics:
         """
         Read data for run_id
         """
+
         # Load config from given model_path if provided, otherwise use path from private config
         if model_path:
-            cf = config.load_model_config(
-                run_id=run_id, mini_epoch=mini_epoch, model_path=model_path
-            )
+            cf = config.load_run_config(run_id=run_id, mini_epoch=mini_epoch, model_path=model_path)
         else:
-            cf = config.load_config(private_home=None, from_run_id=run_id, mini_epoch=mini_epoch)
-        run_id = cf.run_id
+            cf = config.load_merge_configs(
+                private_home=None, from_run_id=run_id, mini_epoch=mini_epoch
+            )
+        run_id = cf.general.run_id
 
-        result_dir_base = Path(cf.run_path)
+        result_dir_base = config.get_path_run(cf)
         result_dir = result_dir_base / run_id
         fname_log_train = result_dir / f"{run_id}_train_log.txt"
         fname_log_val = result_dir / f"{run_id}_val_log.txt"
-        fname_perf_val = result_dir / f"{run_id}_perf_log.txt"
 
         # training
 
         # define cols for training
-        cols_train = ["dtime", "samples", "mse", "lr"]
-        cols1 = [_weathergen_timestamp, "num_samples", "loss_avg_mean", "learning_rate"]
-        for si in cf.streams:
-            for lf in cf.loss_fcts:
-                cols1 += [_key_loss(si["name"], lf[0])]
-                cols_train += [
-                    si["name"].replace(",", "").replace("/", "_").replace(" ", "_") + ", " + lf[0]
-                ]
-        with_stddev = [("stats" in lf) for lf in cf.loss_fcts]
-        if with_stddev:
-            for si in cf.streams:
-                cols1 += [_key_stddev(si["name"])]
-                cols_train += [
-                    si["name"].replace(",", "").replace("/", "_").replace(" ", "_")
-                    + ", "
-                    + "stddev"
-                ]
+        training_cfg = get_active_stage_config(cf.training_config, {}, cfg_keys_to_filter)
+        cols1, cols_train = get_loss_terms_per_stream(cf.streams, training_cfg)
+        cols_train += ["dtime", "samples", "mse", "lr"]
+        cols1 += [_weathergen_timestamp, "num_samples", "loss_avg_mean", "learning_rate"]
+
         # read training log data
         try:
             with open(fname_log_train, "rb") as f:
@@ -261,23 +195,13 @@ class TrainLogger:
 
         # validation
         # define cols for validation
+        validation_cfg = get_active_stage_config(
+            training_cfg, cf.get("validation_config", {}), cfg_keys_to_filter
+        )
+        cols2, cols_val = get_loss_terms_per_stream(cf.streams, validation_cfg)
         cols_val = ["dtime", "samples"]
         cols2 = [_weathergen_timestamp, "num_samples"]
-        for si in cf.streams:
-            for lf in cf.loss_fcts_val:
-                cols_val += [
-                    si["name"].replace(",", "").replace("/", "_").replace(" ", "_") + ", " + lf[0]
-                ]
-                cols2 += [_key_loss(si["name"], lf[0])]
-        with_stddev = [("stats" in lf) for lf in cf.loss_fcts_val]
-        if with_stddev:
-            for si in cf.streams:
-                cols2 += [_key_stddev(si["name"])]
-                cols_val += [
-                    si["name"].replace(",", "").replace("/", "_").replace(" ", "_")
-                    + ", "
-                    + "stddev"
-                ]
+
         # read validation log data
         try:
             with open(fname_log_val, "rb") as f:
@@ -316,54 +240,7 @@ class TrainLogger:
             log_val = np.array([])
         metrics_val_df = read_metrics(cf, run_id, "val", cols2, result_dir_base)
 
-        # performance
-        # define cols for performance monitoring
-        cols_perf = ["GPU", "memory"]
-        # read perf log data
-        try:
-            with open(fname_perf_val, "rb") as f:
-                log_perf = np.loadtxt(f, delimiter=",")
-            log_perf = log_perf.reshape((log_perf.shape[0] // len(cols_perf), len(cols_perf)))
-        except (
-            TypeError,
-            AttributeError,
-            IndexError,
-            ZeroDivisionError,
-            ValueError,
-        ) as e:
-            _logger.warning(
-                (
-                    f"Warning: no validation data loaded for run_id={run_id}",
-                    "Data loading or reshaping failed — "
-                    "possible format, dimension, or logic issue.",
-                    f"Due to specific error: {e}",
-                )
-            )
-        except (FileNotFoundError, PermissionError, OSError) as e:
-            _logger.error(
-                (
-                    f"Error: no validation data loaded for run_id={run_id}",
-                    "File system error occurred while handling the log file.",
-                    f"Due to specific error: {e}",
-                )
-            )
-        except Exception:
-            _logger.error(
-                (
-                    f"Error: no validation data loaded for run_id={run_id}",
-                    f"Due to exception with trace:\n{traceback.format_exc()}",
-                )
-            )
-            log_perf = np.array([])
-        metrics_system_df = read_metrics(
-            cf,
-            run_id,
-            None,
-            [_weathergen_timestamp, _performance_gpu, _performance_memory],
-            result_dir_base,
-        )
-
-        return Metrics(run_id, "train", log_train_df, metrics_val_df, metrics_system_df)
+        return Metrics(run_id, "train", log_train_df, metrics_val_df, None)
 
 
 def read_metrics(
@@ -383,7 +260,7 @@ def read_metrics(
 
     assert cols is None or cols, "cols must be non empty or None"
     if run_id is None:
-        run_id = cf.run_id
+        run_id = cf.general.run_id
     assert run_id, "run_id must be provided"
 
     metrics_path = get_train_metrics_path(base_path=results_path, run_id=run_id)
@@ -441,9 +318,27 @@ def clean_name(s: str) -> str:
     return "".join(c for c in s if c.isalnum() or c == "_")
 
 
+def get_loss_terms_per_stream(streams, stage_config):
+    """
+    Extract per stream loss terms
+    """
+    cols, cols_stage = [], []
+    for si in streams:
+        for _, loss_config in stage_config.get("losses", {}).items():
+            if loss_config.get("type", "LossPhysical") == "LossPhysical":
+                for lname, _ in loss_config.loss_fcts.items():
+                    cols += [_key_loss(si["name"], lname)]
+                    cols_stage += [_clean_stream_name(si["name"]) + lname]
+    return cols, cols_stage
+
+
+def _clean_stream_name(stream_name: str) -> str:
+    return stream_name.replace(",", "").replace("/", "_").replace(" ", "_") + ", "
+
+
 def _key_loss(st_name: str, lf_name: str) -> str:
     st_name = clean_name(st_name)
-    return f"stream.{st_name}.loss_{lf_name}.loss_avg"
+    return f"LossPhysical.{st_name}.{lf_name}.avg"
 
 
 def _key_loss_chn(st_name: str, lf_name: str, ch_name: str) -> str:
@@ -454,3 +349,37 @@ def _key_loss_chn(st_name: str, lf_name: str, ch_name: str) -> str:
 def _key_stddev(st_name: str) -> str:
     st_name = clean_name(st_name)
     return f"stream.{st_name}.stddev_avg"
+
+
+def prepare_losses_for_logging(
+    loss_hist: list,
+    losses_unweighted_hist: list[dict],
+    stddev_unweighted_hist: list[dict],
+) -> tuple[list, dict, dict]:
+    """
+    Aggregates across ranks loss and standard deviation data for logging.
+
+    Returns:
+        real_loss (list): List of ddp-averaged scaler losses used for backpropagation.
+        losses_all (dict): Dictionary mapping each stream name to its
+            per-channel loss tensor.
+        stddev_all (dict): Dictionary mapping each stream name to its
+            per-channel standard deviation tensor.
+    """
+
+    real_loss = [ddp_average(loss).item() for loss in loss_hist]
+
+    losses_all = defaultdict(list)
+    stddev_all = defaultdict(list)
+
+    for d in losses_unweighted_hist:
+        for key, value in flatten_dict(d).items():
+            value = torch.tensor(value, device="cuda") if type(value) is float else value
+            losses_all[key].append(ddp_average(value).item())
+
+    for d in stddev_unweighted_hist:
+        for key, value in flatten_dict(d).items():
+            if value:
+                stddev_all[key].append(ddp_average(value).item())
+
+    return real_loss, losses_all, stddev_all
