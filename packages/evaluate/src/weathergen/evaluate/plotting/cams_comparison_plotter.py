@@ -135,6 +135,15 @@ def _plot_bias_maps(
 
     Maps are written under ``plotter.out_plot_basedir/<stream>/maps/{wg_bias,cams_bias}``.
     """
+    # make sure output directories exist before looping; the Plotter
+    # does not create them automatically and missing dirs were causing
+    # errors during evaluation (see bug report).
+    for tag in ("wg_bias", "cams_bias"):
+        outdir = plotter.get_map_output_dir(tag)
+        if not outdir.exists():
+            _logger.info(f"Creating directory {outdir}")
+            outdir.mkdir(parents=True, exist_ok=True)
+
     for hr in forecast_hours:
         raw = wg_map[hr]
         wg_data = wg_reader.get_data(stream=stream, fsteps=[raw], channels=channels)
@@ -149,11 +158,10 @@ def _plot_bias_maps(
         for ch in channels:
             tar = wg_target.sel(channel=ch)
             pred = wg_pred.sel(channel=ch)
+            # extract coordinates once
             lat = tar["lat"].values
             lon = tar["lon"].values
             wg_bias = pred - tar
-            lat = tar["lat"].values
-            lon = tar["lon"].values
 
             _logger.info(f"Processing forecast step {hr}h, channel {ch}")
             # Ensure wg_bias is calculated before logging
@@ -163,26 +171,77 @@ def _plot_bias_maps(
             cams_vals = cams_reader.get_data(ch, step=hr, target_lat=lat, target_lon=lon)
             cams_vals = np.asarray(cams_vals).ravel()
 
-
-# Log detailed shapes for debugging
+            # Log detailed shapes for debugging
+            _logger.info(f"wg_bias shape: {wg_bias.shape}")
+            _logger.info(f"cams_vals shape: {cams_vals.shape}")
             wg_bias_da, cams_bias_da = _prepare_bias_da(pred, tar, cams_vals)
             plotter.update_data_selection(
                 {"sample": 0, "stream": stream, "forecast_step": hr}
             )
-            plotter.scatter_plot(
-                wg_bias_da,
-                plotter.get_map_output_dir("wg_bias"),
-                f"wg_bias_{ch}",
-                "global",
-                title=f"WG Bias – {ch} (fstep {fstep})",
+            # compute symmetric color bounds so zero is centered on the bar
+            all_vals = np.concatenate([
+                np.asarray(wg_bias_da).ravel(),
+                np.asarray(cams_bias_da).ravel(),
+            ])
+            if all_vals.size > 0:
+                maxabs = float(np.nanmax(np.abs(all_vals)))
+            else:
+                maxabs = 0.0
+            map_opts = {"vmin": -maxabs, "vmax": maxabs, "colormap": "coolwarm"}
+
+            # produce a combined figure with two side-by-side maps sharing
+            # the same symmetric colourbar centred on zero
+            import cartopy.crs as ccrs
+
+            # directory for combined bias plots
+            combo_dir = plotter.out_plot_basedir / stream / "maps" / "bias_compare"
+            combo_dir.mkdir(parents=True, exist_ok=True)
+
+            fig = plt.figure(figsize=(16, 8), dpi=300)
+            axs = [
+                fig.add_subplot(1, 2, 1, projection=ccrs.Robinson()),
+                fig.add_subplot(1, 2, 2, projection=ccrs.Robinson()),
+            ]
+            titles = [
+                "CAMS Forecast – Analysis",
+                "WG Prediction – Target",
+            ]
+            das = [cams_bias_da, wg_bias_da]
+
+            for ax, da, title in zip(axs, das, titles):
+                ax.coastlines()
+                scatter_plt = ax.scatter(
+                    da["lon"],
+                    da["lat"],
+                    c=da.values,
+                    cmap=map_opts.get("colormap", "coolwarm"),
+                    vmin=map_opts.get("vmin"),
+                    vmax=map_opts.get("vmax"),
+                    transform=ccrs.PlateCarree(),
+                    s=1,
+                    linewidths=0.0,
+                )
+                ax.set_global()
+                ax.set_title(f"{title} – {ch} (fstep {hr})")
+
+            # shared colorbar beneath both axes
+            mappable = scatter_plt
+            cbar = fig.colorbar(
+                mappable,
+                ax=axs,
+                orientation="horizontal",
+                pad=0.02,                # smaller pad to keep colorbar close to axes
+                fraction=0.04,           # make bar thinner
             )
-            plotter.scatter_plot(
-                cams_bias_da,
-                plotter.get_map_output_dir("cams_bias"),
-                f"cams_bias_{ch}",
-                "global",
-                title=f"CAMS Bias – {ch} (fstep {fstep})",
-            )
+            cbar.set_label("Bias (units)")
+
+            # explicitly adjust margins so the colorbar isn't clipped; we want
+            # some space at bottom for ticks and label
+            fig.subplots_adjust(left=0.05, right=0.95, top=0.90, bottom=0.15)
+
+            fname = combo_dir / f"bias_{ch}_fstep_{hr}.png"
+            fig.savefig(fname, bbox_inches="tight", pad_inches=0.1)
+            plt.close(fig)
             plotter.clean_data_selection()
 
 
@@ -226,18 +285,120 @@ def _rmse_scorecard(
     records = []
     for ch in wg_rmse:
         for step, wg_val, cams_val in zip(valid_steps, wg_rmse[ch], cams_rmse[ch]):
+            better = "tie"
+            if wg_val < cams_val:
+                better = "wg"
+            elif cams_val < wg_val:
+                better = "cams"
             records.append(
                 {
                     "forecast_step": step,
                     "channel": ch,
                     "wg_rmse": wg_val,
                     "cams_rmse": cams_val,
+                    "better": better,
                 }
             )
     df = pd.DataFrame(records)
     scorecard_path = rmse_dir / f"rmse_scorecard_{run_id}.csv"
     df.to_csv(scorecard_path, index=False)
     _logger.info(f"Written RMSE scorecard to: {scorecard_path}")
+
+    # also render the table as an image for quick visual inspection
+    try:
+        fig, ax = plt.subplots(figsize=(len(df.columns) * 2, len(df) * 0.3 + 1), dpi=300)
+        ax.axis("off")
+        tbl = ax.table(
+            cellText=df.values,
+            colLabels=df.columns,
+            cellLoc="center",
+            loc="center",
+        )
+        tbl.auto_set_font_size(False)
+        tbl.set_fontsize(8)
+        fig.tight_layout()
+        img_path = rmse_dir / f"rmse_scorecard_{run_id}.png"
+        fig.savefig(img_path, bbox_inches="tight")
+        plt.close(fig)
+        _logger.info(f"Written RMSE scorecard image to: {img_path}")
+    except Exception as exc:  # pragma: no cover - optional dependency
+        _logger.warning(f"Could not write scorecard image: {exc}")
+
+    # extra visualization: heatmap of WG vs CAMS relative RMSE per channel/step
+    try:
+        df_heat = df.copy()
+        df_heat["rel_pct"] = (
+            (df_heat["wg_rmse"] - df_heat["cams_rmse"]) / df_heat["cams_rmse"] * 100
+        )
+        channels = sorted(df_heat["channel"].unique())
+        steps = sorted(df_heat["forecast_step"].unique())
+        nchan = len(channels)
+        # leave some vertical space between rows so the maps aren't squeezed;
+        # we still adjust bottom margin later for the colorbar
+        fig, axes = plt.subplots(
+            nchan,
+            1,
+            figsize=(max(6, len(steps)), 1.5 * nchan),
+            dpi=300,
+            gridspec_kw={"hspace": 0.4},
+        )
+        if nchan == 1:
+            axes = [axes]
+        # determine symmetric color limits from the data so the colormap isn't
+        # overly compressed. fall back to 1.0 if the dataframe is empty.
+        all_rel = df_heat["rel_pct"].values
+        if all_rel.size > 0:
+            lim = float(np.nanmax(np.abs(all_rel)))
+        else:
+            lim = 1.0
+
+        # track the image objects we create so we can always build a colorbar
+        images = []
+        for ax, ch in zip(axes, channels):
+            vals = (
+                df_heat[df_heat["channel"] == ch]
+                .set_index("forecast_step")["rel_pct"]
+                .reindex(steps)
+                .values.reshape(1, -1)
+            )
+            im = ax.imshow(vals, aspect="auto", cmap="coolwarm", vmin=-lim, vmax=lim)
+            images.append(im)
+            ax.set_ylabel(ch)
+            ax.set_yticks([])
+            ax.set_xticks(range(len(steps)))
+            ax.set_xticklabels(steps)
+
+        # use the last image created as the mappable for the shared colorbar
+        mappable = images[-1] if images else None
+
+        if mappable is not None:
+            # place a single horizontal colorbar underneath all rows; increase
+            # pad so it doesn’t overlap the top panel. use a small fraction so the
+            # bar itself isn’t too tall.
+            cbar = fig.colorbar(
+                mappable,
+                ax=axes if isinstance(axes, (list, tuple, np.ndarray)) else [axes],
+                orientation="horizontal",
+                pad=0.15,
+                fraction=0.05,
+            )
+            cbar.set_label("RMSE relative to CAMS (%)")
+
+            # make room for the colorbar and avoid clipping when saving the figure
+            fig.subplots_adjust(bottom=0.25)
+        else:
+            _logger.warning("No mappable found for heatmap, skipping colorbar")
+
+        heat_path = rmse_dir / f"rmse_scorecard_heatmap_{run_id}.png"
+        # avoid calling tight_layout after the colorbar, it often shrinks the
+        # axes and pushes the bar off the figure; rely on the explicit subplots
+        # adjustment instead and give a generous pad so the colorbar isn’t clipped.
+        fig.savefig(heat_path, dpi=300, bbox_inches="tight", pad_inches=0.2)
+        plt.close(fig)
+        _logger.info(f"Written RMSE heatmap to: {heat_path}")
+    except Exception as exc:  # pragma: no cover
+        _logger.warning(f"Could not write RMSE heatmap: {exc}")
+
     return scorecard_path
 
 
@@ -315,9 +476,18 @@ def plot_cams_wg_comparison(
         "fig_size": (10, 6),
         "regions": ["global"],
     }
-    output_dir = Path(
-        eval_cfg.get("runplot_base_dir", eval_cfg.get("results_base_dir", "."))
-    ) / run_id
+    # The eval configuration may already include the run_id in the
+    # directory path (e.g. results_base_dir or runplot_base_dir set to
+    # "results/<run_id>").  The Plotter class expects the path it receives
+    # to *already* include the run id (see its docstring).  In the past we
+    # always appended ``/ run_id`` which resulted in nested directories
+    # like ``results/foo/foo`` when the base was ``results/foo``.
+    base_dir = Path(eval_cfg.get("runplot_base_dir", eval_cfg.get("results_base_dir", ".")))
+    if base_dir.name == run_id:
+        output_dir = base_dir
+    else:
+        output_dir = base_dir / run_id
+
     plotter = Plotter(plotter_cfg, output_dir, stream=stream)
 
     # --- load WG data once (all requested forecast steps) ---------------
@@ -347,30 +517,53 @@ def plot_cams_wg_comparison(
 
             wg_rmse_per_channel[ch].append(float(_compute_rmse(pred, tar)))
 
-            # Ensure cams_vals is calculated before logging
+            # fetch CAMS values and compute its rmse
             cams_vals = cams_reader.get_data(ch, step=hr, target_lat=tar["lat"].values, target_lon=tar["lon"].values)
             cams_vals = np.asarray(cams_vals).ravel()
+            tar_flat = np.asarray(tar.values).ravel()
+            cams_rmse_per_channel[ch].append(
+                float(np.sqrt(((cams_vals - tar_flat) ** 2).mean()))
+            )
 
+            # we simply accumulate RMSE values here; detailed bias maps
+            # are produced later by _plot_bias_maps if requested.
 
-# # Log detailed shapes for debugging
-#             wg_bias_da, cams_bias_da = _prepare_bias_da(pred, tar, cams_vals)
-#             plotter.update_data_selection(
-#                 {"sample": 0, "stream": stream, "forecast_step": hr}
-#             )
-#             plotter.scatter_plot(
-#                 wg_bias_da,
-#                 plotter.get_map_output_dir("wg_bias"),
-#                 f"wg_bias_{ch}",
-#                 "global",
-#                 title=f"WG Bias – {ch} (fstep {fstep})",
-#             )
-#             plotter.scatter_plot(
-#                 cams_bias_da,
-#                 plotter.get_map_output_dir("cams_bias"),
-#                 f"cams_bias_{ch}",
-#                 "global",
-#                 title=f"CAMS Bias – {ch} (fstep {fstep})",
-#             )
-#             plotter.clean_data_selection()
+    # Once the iteration over forecast hours and channels is complete we
+    # optionally create outputs based on the flags supplied in the CAMS
+    # configuration.
+    if plot_bias_maps_flag:
+        _logger.info("Generating bias maps for common forecast steps")
+        _plot_bias_maps(
+            plotter,
+            wg_reader,
+            cams_reader,
+            stream,
+            channels,
+            forecast_steps,
+            wg_map,
+            run_id,
+        )
+
+    if plot_rmse_flag or write_scorecard_flag:
+        rmse_dir = output_dir / stream / "rmse"
+        rmse_dir.mkdir(parents=True, exist_ok=True)
+
+        if plot_rmse_flag:
+            _plot_rmse_curves(
+                rmse_dir,
+                valid_fsteps,
+                wg_rmse_per_channel,
+                cams_rmse_per_channel,
+                run_id,
+            )
+
+        if write_scorecard_flag:
+            _rmse_scorecard(
+                rmse_dir,
+                valid_fsteps,
+                wg_rmse_per_channel,
+                cams_rmse_per_channel,
+                run_id,
+            )
 
 

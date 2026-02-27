@@ -545,6 +545,11 @@ class Plotter:
         name = "_".join(filter(None, parts))
         fname = f"{map_output_dir.joinpath(name)}.{self.image_format}"
 
+        # ensure destination directory exists (caught in evaluation tests)
+        if not map_output_dir.exists():
+            _logger.debug(f"Creating missing output directory {map_output_dir}")
+            map_output_dir.mkdir(parents=True, exist_ok=True)
+
         _logger.debug(f"Saving map to {fname}")
         plt.savefig(fname)
         plt.close()
@@ -1271,7 +1276,7 @@ class ScoreCards:
             # Plot 2: Improvement Heatmap
             ax2 = axes[1]
             improvement_data = var_df[[f'{metric.upper()} Δ (%)']].values
-            im = ax2.imshow(improvement_data, cmap='RdYlGn_r', aspect='auto', vmin=-50, vmax=50)
+            im = ax2.imshow(improvement_data, cmap='Blues', aspect='auto', vmin=-50, vmax=50)
             ax2.set_xticks([0])
             ax2.set_xticklabels([f'{metric.upper()} Δ%'], fontsize=10)
             ax2.set_yticks(np.arange(len(channels_sorted)))
@@ -1313,7 +1318,7 @@ class ScoreCards:
         # Create heatmap
         sns.heatmap(
             heatmap_data,
-            cmap='RdYlGn_r',
+            cmap='Blues',
             center=0,
             vmin=-50,
             vmax=50,
