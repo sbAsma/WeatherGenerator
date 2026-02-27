@@ -29,7 +29,10 @@ from weathergen.model.embeddings import (
 )
 from weathergen.model.layers import MLP
 from weathergen.model.utils import ActivationFactory
+from weathergen.model.gnn_channel_reducer import GNNChannelReducer
 from weathergen.utils.utils import get_dtype
+
+logger = __import__("logging").getLogger(__name__)
 
 
 class EmbeddingEngine(torch.nn.Module):
@@ -51,17 +54,44 @@ class EmbeddingEngine(torch.nn.Module):
         self.embeds = torch.nn.ModuleDict()
         self.stream_names = [str(stream_cfg["name"]) for stream_cfg in cf.streams]
 
+        # --- GNN channel reducer for high-dimensional streams (e.g. CAMS) ----
+        self.gnn_reducers = torch.nn.ModuleDict()
+        gnn_cfg = cf.get("gnn_reducer", None)
+        gnn_target_streams = []
+        if gnn_cfg is not None and gnn_cfg.get("enable", False):
+            gnn_target_streams = list(gnn_cfg.get("target_streams", []))
+
         for i, (si, stream_name) in enumerate(zip(self.cf.streams, self.stream_names, strict=True)):
             if si.get("diagnostic", False) or self.sources_size[i] == 0:
                 self.embeds[stream_name] = torch.nn.Identity()
                 continue
+
+            # Determine effective num_channels for this stream
+            effective_num_channels = self.sources_size[i]
+
+            # Build a GNN reducer for streams that need channel reduction
+            if stream_name in gnn_target_streams:
+                reducer = GNNChannelReducer(
+                    n_channels=self.sources_size[i],
+                    token_size=si["token_size"],
+                    latent_dim=gnn_cfg.get("latent_dim", 32),
+                    hidden_dim=gnn_cfg.get("hidden_dim", 128),
+                    n_layers=gnn_cfg.get("n_layers", 3),
+                    k_neighbors=gnn_cfg.get("k_neighbors", 8),
+                )
+                self.gnn_reducers[stream_name] = reducer
+                effective_num_channels = gnn_cfg.get("latent_dim", 32)
+                logger.info(
+                    "GNN channel reducer for %s: %d → %d channels",
+                    stream_name, self.sources_size[i], effective_num_channels,
+                )
 
             if si["embed"]["net"] == "transformer":
                 self.embeds[stream_name] = StreamEmbedTransformer(
                     mode=self.cf.embed_orientation,
                     num_tokens=si["embed"]["num_tokens"],
                     token_size=si["token_size"],
-                    num_channels=self.sources_size[i],
+                    num_channels=effective_num_channels,
                     dim_embed=si["embed"]["dim_embed"],
                     dim_out=self.cf.ae_local_dim_embed,
                     num_blocks=si["embed"]["num_blocks"],
@@ -73,7 +103,7 @@ class EmbeddingEngine(torch.nn.Module):
                 )
             elif si["embed"]["net"] == "linear":
                 self.embeds[stream_name] = StreamEmbedLinear(
-                    self.sources_size[i] * si["token_size"],
+                    effective_num_channels * si["token_size"],
                     self.cf.ae_local_dim_embed,
                     stream_name=stream_name,
                 )
@@ -101,6 +131,10 @@ class EmbeddingEngine(torch.nn.Module):
             # skip empty stream
             if len(sdata) == 0:
                 continue
+
+            # apply GNN channel reducer if configured for this stream
+            if stream_name in self.gnn_reducers:
+                sdata = self.gnn_reducers[stream_name](sdata)
 
             # embedding from physical space to per patch latent representation
             x_embeds += [self.embeds[stream_name](sdata).flatten(0, 1)]

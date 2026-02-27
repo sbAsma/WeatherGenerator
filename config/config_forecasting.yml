@@ -90,7 +90,23 @@ norm_type: "LayerNorm"
 
 #####################################
 
-streams_directory: "./config/streams/era5_1deg_forecasting/"
+streams_directory: "./config/streams/era5_1deg_cams_eac4_an_pretrain"
+# start_date: 200301010000
+# end_date: 202012310000
+# start_date_val: 202105310000
+# end_date_val: 202205310000
+
+# GNN-based channel reducer for CAMS streams
+gnn_reducer:
+  enable: true
+  target_streams: ["CAMSANALYSIS", "CAMSEAC4"]  # ✅ Specify which streams to apply GNN reducer to
+  n_channels: 81         # actual count from dataset (sources_size)
+  token_size: 16
+  latent_dim: 32        # 73 → 32 before StreamEmbedTransformer
+  hidden_dim: 128
+  n_layers: 3
+  k_neighbors: 8
+
 streams: ???
 
 # type of zarr_store
@@ -143,8 +159,8 @@ training_config:
   start_date: 1979-01-01T00:00
   end_date: 2015-07-24T00:00
 
-  time_window_step: 3:00:00
-  time_window_len: 3:00:00
+  time_window_step: 6:00:00
+  time_window_len: 6:00:00
   
   learning_rate_scheduling :
     lr_start: 1e-6
@@ -184,7 +200,7 @@ training_config:
     }
 
   forecast :
-      time_step: 3:00:00
+      time_step: 6:00:00
       offset: 0
       num_steps: 0
       policy: "fixed"
