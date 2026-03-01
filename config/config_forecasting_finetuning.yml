@@ -99,7 +99,7 @@ zarr_store: "zip" # "zarr" for LocalStore, "zip" for ZipStore
 general:
 
   # mutable parameters
-  istep: 0
+  # istep: 0
   rank: ???
   world_size: ???
 
@@ -143,8 +143,8 @@ training_config:
   start_date: 1979-01-01T00:00
   end_date: 2015-07-24T00:00
 
-  time_window_step: 3:00:00
-  time_window_len: 3:00:00
+  time_window_step: 6:00:00
+  time_window_len: 6:00:00
   
   learning_rate_scheduling :
     lr_start: 1e-6
@@ -183,7 +183,7 @@ training_config:
     }
 
   forecast :
-      time_step: 03:00:00
+      time_step: 06:00:00
       offset: 1
       num_steps: 2
       policy: "fixed"
