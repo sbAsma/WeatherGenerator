@@ -58,7 +58,7 @@ class WeatherGenReader(Reader):
             self.eval_cfg.get("metrics_base_dir", self.results_base_dir)
         )  # base directory where score files will be stored
 
-        self.step_hrs = self.inference_cfg.get("step_hrs", 1)
+        self.step_hrs = self.inference_cfg.get("step_hrs", self.eval_cfg.get("step_hrs", 1))
 
         self.results_dir, self.runplot_dir = (
             Path(self.results_base_dir),

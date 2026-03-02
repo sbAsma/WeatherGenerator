@@ -437,6 +437,10 @@ def plot_cams_wg_comparison(
 
     # --- readers ---------------------------------------------------------
     wg_reader = WeatherGenZarrReader(eval_cfg, run_id)
+    # step_hrs may not be present in the per-run inference config; allow
+    # it to be specified in cams_cfg (the top-level evaluation section).
+    if "step_hrs" in cams_cfg:
+        wg_reader.step_hrs = int(cams_cfg["step_hrs"])
     cams_reader = CAMSForecastReader(cams_cfg)
 
     # handle user specification of "all" or other shorthand for steps

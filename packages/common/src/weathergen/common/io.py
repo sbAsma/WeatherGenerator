@@ -822,7 +822,7 @@ class CAMSForecastReader:
         self.eval_cfg = eval_cfg
         logging.info(f"Initializing CAMSForecastReader with config: {eval_cfg}")
         self.cams_base_dir = Path(self.eval_cfg.get("cams_base_dir"))
-        filename = self.cams_base_dir / "cams_forecast_2022.zarr"
+        filename = self.cams_base_dir / "cams_forecast_co_data_2016.zarr"
         ds_surface = xr.open_zarr(filename, group="surface", chunks={"time": 24})
         ds_profiles = xr.open_zarr(filename, group="profiles", chunks={"time": 24})
 
