@@ -15,6 +15,42 @@ from weathergen.evaluate.plotting.plotter import Plotter
 
 _logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# PPM conversion helpers
+# ---------------------------------------------------------------------------
+
+# Molecular weight of dry air (g/mol)
+_M_AIR: float = 28.97
+
+# Species molecular weights (g/mol), keyed by channel-name prefix.
+# Profile channels follow the pattern ``<species>_<level>`` (e.g. ``co_500``).
+_M_SPECIES: dict[str, float] = {
+    "co": 28.01,
+    "no2": 46.01,
+    "no": 30.01,
+    "so2": 64.07,
+    "o3": 48.00,
+    "go3": 48.00,
+}
+
+
+def _channel_ppm_factor(channel: str) -> float | None:
+    """Return the kg kg\u207b\u00b9 \u2192 ppmv conversion factor for *channel*, or ``None``.
+
+    Profile channels (e.g. ``co_500``) are converted using
+    ``ppmv = value * (M_air / M_species) * 1e6``.
+    Total-column (``tc_*``) and surface-particulate (``pm*``) channels are
+    excluded because ppmv is not a meaningful unit for them.
+    """
+    ch = channel.lower()
+    if ch.startswith("tc_") or ch.startswith("pm"):
+        return None
+    # match longest prefix first (no2 before no)
+    for species in sorted(_M_SPECIES, key=len, reverse=True):
+        if ch.startswith(species + "_") or ch == species:
+            return (_M_AIR / _M_SPECIES[species]) * 1e6
+    return None
+
 
 def _compute_rmse(pred: xr.DataArray, target: xr.DataArray, dim: str = "ipoint") -> xr.DataArray:
     """Compute root-mean-square error along *dim*."""
@@ -130,6 +166,7 @@ def _plot_bias_maps(
     forecast_hours: list[int],
     wg_map: dict[int, int],
     run_id: str,
+    convert_to_ppm: bool = False,
 ) -> None:
     """Produce and save global bias scatter maps for each forecast step/channel.
 
@@ -175,6 +212,14 @@ def _plot_bias_maps(
             _logger.info(f"wg_bias shape: {wg_bias.shape}")
             _logger.info(f"cams_vals shape: {cams_vals.shape}")
             wg_bias_da, cams_bias_da = _prepare_bias_da(pred, tar, cams_vals)
+
+            # optionally convert kg/kg bias to ppmv
+            ppm_factor = _channel_ppm_factor(ch) if convert_to_ppm else None
+            if ppm_factor is not None:
+                wg_bias_da = wg_bias_da * ppm_factor
+                cams_bias_da = cams_bias_da * ppm_factor
+                _logger.info(f"Applied ppm conversion factor {ppm_factor:.4g} to {ch} bias")
+
             plotter.update_data_selection(
                 {"sample": 0, "stream": stream, "forecast_step": hr}
             )
@@ -233,16 +278,204 @@ def _plot_bias_maps(
                 pad=0.02,                # smaller pad to keep colorbar close to axes
                 fraction=0.04,           # make bar thinner
             )
-            cbar.set_label("Bias (units)")
+            bias_unit = "ppm" if (convert_to_ppm and _channel_ppm_factor(ch) is not None) else "kg kg\u207b\u00b9"
+            cbar.set_label(f"Bias ({bias_unit})")
 
             # explicitly adjust margins so the colorbar isn't clipped; we want
             # some space at bottom for ticks and label
             fig.subplots_adjust(left=0.05, right=0.95, top=0.90, bottom=0.15)
 
-            fname = combo_dir / f"bias_{ch}_fstep_{hr}.png"
+            fname = combo_dir / f"bias_{ch}_fstep_{hr:03d}.png"
             fig.savefig(fname, bbox_inches="tight", pad_inches=0.1)
             plt.close(fig)
             plotter.clean_data_selection()
+
+
+def _plot_value_maps(
+    plotter: Plotter,
+    wg_reader: WeatherGenZarrReader,
+    cams_reader: CAMSForecastReader,
+    stream: str,
+    channels: list[str],
+    forecast_hours: list[int],
+    wg_map: dict[int, int],
+    run_id: str,
+    convert_to_ppm: bool = False,
+) -> "Path":
+    """Produce and save side-by-side global maps of CAMS forecast vs WG prediction.
+
+    Each frame is a Robinson-projection scatter plot with two panels:
+    *CAMS Forecast* (left) and *WG Prediction* (right), sharing a common
+    colour scale derived from the combined range of both datasets.
+
+    Frames are written under
+    ``plotter.out_plot_basedir/<stream>/maps/value_compare/``
+    with the naming convention ``values_{ch}_fstep_{hr:03d}.png``.
+
+    Returns
+    -------
+    Path
+        Output directory where the frames were saved.
+    """
+    import cartopy.crs as ccrs
+
+    value_dir = plotter.out_plot_basedir / stream / "maps" / "value_compare"
+    value_dir.mkdir(parents=True, exist_ok=True)
+    _logger.info(f"Saving value comparison maps to {value_dir}")
+
+    for hr in forecast_hours:
+        raw = wg_map[hr]
+        wg_data = wg_reader.get_data(stream=stream, fsteps=[raw], channels=channels)
+        if raw not in wg_data.target:
+            _logger.warning(
+                f"Forecast step {hr}h (raw {raw}) not found in WG output – skipping."
+            )
+            continue
+        wg_target = wg_data.target[raw]
+        wg_pred = wg_data.prediction[raw]
+
+        for ch in channels:
+            tar = wg_target.sel(channel=ch)
+            pred = wg_pred.sel(channel=ch)
+            lat = tar["lat"].values
+            lon = tar["lon"].values
+
+            cams_vals = cams_reader.get_data(
+                ch, step=hr, target_lat=lat, target_lon=lon
+            )
+            cams_vals = np.asarray(cams_vals).ravel()
+            pred_vals = np.asarray(pred).ravel()
+
+            # optionally convert kg/kg values to ppmv
+            ppm_factor = _channel_ppm_factor(ch) if convert_to_ppm else None
+            if ppm_factor is not None:
+                cams_vals = cams_vals * ppm_factor
+                pred_vals = pred_vals * ppm_factor
+                _logger.info(f"Applied ppm conversion factor {ppm_factor:.4g} to {ch} values")
+
+            # shared colour range so both panels are directly comparable
+            all_vals = np.concatenate([cams_vals, pred_vals])
+            vmin = float(np.nanmin(all_vals))
+            vmax = float(np.nanmax(all_vals))
+
+            _logger.info(
+                f"Value map – fstep {hr}h, channel {ch}: "
+                f"vmin={vmin:.4g}, vmax={vmax:.4g}"
+            )
+
+            fig = plt.figure(figsize=(16, 8), dpi=300)
+            axs = [
+                fig.add_subplot(1, 2, 1, projection=ccrs.Robinson()),
+                fig.add_subplot(1, 2, 2, projection=ccrs.Robinson()),
+            ]
+            titles = ["CAMS Forecast", "WG Prediction"]
+            data_pairs = [
+                (lon, lat, cams_vals),
+                (lon, lat, pred_vals),
+            ]
+
+            last_sc = None
+            for ax, title, (lons, lats, vals) in zip(axs, titles, data_pairs):
+                ax.coastlines()
+                last_sc = ax.scatter(
+                    lons,
+                    lats,
+                    c=vals,
+                    cmap="viridis",
+                    vmin=vmin,
+                    vmax=vmax,
+                    transform=ccrs.PlateCarree(),
+                    s=1,
+                    linewidths=0.0,
+                )
+                ax.set_global()
+                ax.set_title(f"{title} – {ch} (fstep {hr}h)")
+
+            cbar = fig.colorbar(
+                last_sc,
+                ax=axs,
+                orientation="horizontal",
+                pad=0.02,
+                fraction=0.04,
+            )
+            value_unit = "ppm" if (convert_to_ppm and _channel_ppm_factor(ch) is not None) else "kg kg\u207b\u00b9"
+            cbar.set_label(f"{ch} ({value_unit})")
+
+            fig.subplots_adjust(left=0.05, right=0.95, top=0.90, bottom=0.15)
+
+            fname = value_dir / f"values_{ch}_fstep_{hr:03d}.png"
+            fig.savefig(fname, bbox_inches="tight", pad_inches=0.1)
+            plt.close(fig)
+            _logger.info(f"Saved value comparison map: {fname}")
+
+    return value_dir
+
+
+def _build_animation_from_frames(
+    frame_dir: "Path",
+    channels: list[str],
+    forecast_hours: list[int],
+    run_id: str,
+    fps: float = 2.0,
+    prefix: str = "values",
+) -> list["Path"]:
+    """Assemble per-step PNG frames into per-channel GIF animations.
+
+    Parameters
+    ----------
+    frame_dir : Path
+        Directory that contains the individual PNG frames.
+    channels : list[str]
+        Channel names to animate.
+    forecast_hours : list[int]
+        Forecast hours in the desired frame order.
+    run_id : str
+        Run identifier included in the output GIF filename.
+    fps : float
+        Frames per second.  Defaults to 2.
+    prefix : str
+        Filename prefix used when the frames were saved
+        (``"values"`` or ``"bias"``).
+
+    Returns
+    -------
+    list[Path]
+        Paths to the GIF files that were created.
+    """
+    from PIL import Image
+
+    duration_ms = int(1000 / fps) if fps > 0 else 400
+    anim_dir = frame_dir / "animations"
+    anim_dir.mkdir(parents=True, exist_ok=True)
+
+    gif_paths: list[Path] = []
+    for ch in channels:
+        frames: list[Image.Image] = []
+        for hr in sorted(forecast_hours):
+            png = frame_dir / f"{prefix}_{ch}_fstep_{hr:03d}.png"
+            if png.exists():
+                frames.append(Image.open(png).copy())
+            else:
+                _logger.warning(f"Frame {png} not found – skipping in animation.")
+
+        if not frames:
+            _logger.warning(
+                f"No frames found for channel {ch} in {frame_dir} – skipping animation."
+            )
+            continue
+
+        gif_path = anim_dir / f"animation_{prefix}_{ch}_{run_id}.gif"
+        frames[0].save(
+            gif_path,
+            save_all=True,
+            append_images=frames[1:],
+            duration=duration_ms,
+            loop=0,
+        )
+        _logger.info(f"Saved animation: {gif_path}")
+        gif_paths.append(gif_path)
+
+    return gif_paths
 
 
 def _plot_rmse_curves(
@@ -428,8 +661,12 @@ def plot_cams_wg_comparison(
 
     # plot control flags
     plot_bias_maps_flag = cams_cfg.get("plot_bias_maps", False)
+    plot_value_maps_flag = cams_cfg.get("plot_value_maps", False)
+    create_video_flag = cams_cfg.get("create_video", False)
+    fps = float(cams_cfg.get("fps", 2.0))
     plot_rmse_flag = cams_cfg.get("plot_rmse_curves", False)
     write_scorecard_flag = cams_cfg.get("write_scorecard", False)
+    convert_to_ppm = bool(cams_cfg.get("convert_to_ppm", False))
     # hook for further settings if needed
     # bias_map_opts = cams_cfg.get("bias_map_opts", {})
     # rmse_plot_opts = cams_cfg.get("rmse_plot_opts", {})
@@ -479,6 +716,7 @@ def plot_cams_wg_comparison(
         "dpi_val": 300,
         "fig_size": (10, 6),
         "regions": ["global"],
+        "fps": fps,
     }
     # The eval configuration may already include the run_id in the
     # directory path (e.g. results_base_dir or runplot_base_dir set to
@@ -519,14 +757,24 @@ def plot_cams_wg_comparison(
             lon = tar["lon"].values
             wg_bias = pred - tar
 
-            wg_rmse_per_channel[ch].append(float(_compute_rmse(pred, tar)))
-
-            # fetch CAMS values and compute its rmse
+            # fetch CAMS values and compute RMSE; optionally convert to ppm first
             cams_vals = cams_reader.get_data(ch, step=hr, target_lat=tar["lat"].values, target_lon=tar["lon"].values)
             cams_vals = np.asarray(cams_vals).ravel()
             tar_flat = np.asarray(tar.values).ravel()
+
+            ppm_factor = _channel_ppm_factor(ch) if convert_to_ppm else None
+            if ppm_factor is not None:
+                pred_ppm = pred * ppm_factor
+                tar_ppm = tar * ppm_factor
+                cams_vals_rmse = cams_vals * ppm_factor
+                tar_flat_rmse = tar_flat * ppm_factor
+            else:
+                pred_ppm, tar_ppm = pred, tar
+                cams_vals_rmse, tar_flat_rmse = cams_vals, tar_flat
+
+            wg_rmse_per_channel[ch].append(float(_compute_rmse(pred_ppm, tar_ppm)))
             cams_rmse_per_channel[ch].append(
-                float(np.sqrt(((cams_vals - tar_flat) ** 2).mean()))
+                float(np.sqrt(((cams_vals_rmse - tar_flat_rmse) ** 2).mean()))
             )
 
             # we simply accumulate RMSE values here; detailed bias maps
@@ -537,6 +785,7 @@ def plot_cams_wg_comparison(
     # configuration.
     if plot_bias_maps_flag:
         _logger.info("Generating bias maps for common forecast steps")
+        bias_dir = plotter.out_plot_basedir / stream / "maps" / "bias_compare"
         _plot_bias_maps(
             plotter,
             wg_reader,
@@ -546,7 +795,42 @@ def plot_cams_wg_comparison(
             forecast_steps,
             wg_map,
             run_id,
+            convert_to_ppm=convert_to_ppm,
         )
+        if create_video_flag:
+            _logger.info("Building bias map animations")
+            _build_animation_from_frames(
+                bias_dir,
+                channels,
+                forecast_steps,
+                run_id,
+                fps=fps,
+                prefix="bias",
+            )
+
+    if plot_value_maps_flag:
+        _logger.info("Generating value comparison maps (CAMS vs WG)")
+        value_dir = _plot_value_maps(
+            plotter,
+            wg_reader,
+            cams_reader,
+            stream,
+            channels,
+            forecast_steps,
+            wg_map,
+            run_id,
+            convert_to_ppm=convert_to_ppm,
+        )
+        if create_video_flag:
+            _logger.info("Building value map animations")
+            _build_animation_from_frames(
+                value_dir,
+                channels,
+                forecast_steps,
+                run_id,
+                fps=fps,
+                prefix="values",
+            )
 
     if plot_rmse_flag or write_scorecard_flag:
         rmse_dir = output_dir / stream / "rmse"
