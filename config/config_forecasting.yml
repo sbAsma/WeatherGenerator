@@ -11,7 +11,7 @@ embed_orientation: "channels"
 embed_unembed_mode: "block"
 embed_dropout_rate: 0.1
 
-ae_local_dim_embed: 2048
+ae_local_dim_embed: 512 # 2048
 ae_local_num_blocks: 0
 ae_local_num_heads: 16
 ae_local_dropout_rate: 0.1
@@ -25,7 +25,7 @@ ae_adapter_with_qk_lnorm: True
 ae_adapter_with_residual: True
 ae_adapter_dropout_rate: 0.1
 
-ae_global_dim_embed: 2048
+ae_global_dim_embed: 1024 # 2048
 ae_global_num_blocks: 4
 ae_global_num_heads: 32
 ae_global_dropout_rate: 0.1
@@ -143,8 +143,8 @@ training_config:
   start_date: 1979-01-01T00:00
   end_date: 2015-07-24T00:00
 
-  time_window_step: 3:00:00
-  time_window_len: 3:00:00
+  time_window_step: 6:00:00
+  time_window_len: 6:00:00
   
   learning_rate_scheduling :
     lr_start: 1e-6
@@ -178,15 +178,14 @@ training_config:
   model_input: {
     "forecasting" : {
       # masking strategy: "random", "healpix", "forecast"
-      masking_strategy: "random",
-      masking_strategy_config: { rate: 0.4 },
+      masking_strategy: "forecast",
       },
     }
 
   forecast :
-      time_step: 3:00:00
-      offset: 0
-      num_steps: 0
+      time_step: 06:00:00
+      offset: 1
+      num_steps: 8
       policy: "fixed"
 
 

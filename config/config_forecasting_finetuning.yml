@@ -11,7 +11,7 @@ embed_orientation: "channels"
 embed_unembed_mode: "block"
 embed_dropout_rate: 0.1
 
-ae_local_dim_embed: 2048
+ae_local_dim_embed: 512 # 2048
 ae_local_num_blocks: 0
 ae_local_num_heads: 16
 ae_local_dropout_rate: 0.1
@@ -25,7 +25,7 @@ ae_adapter_with_qk_lnorm: True
 ae_adapter_with_residual: True
 ae_adapter_dropout_rate: 0.1
 
-ae_global_dim_embed: 2048
+ae_global_dim_embed: 1024 # 2048
 ae_global_num_blocks: 4
 ae_global_num_heads: 32
 ae_global_dropout_rate: 0.1
@@ -99,7 +99,7 @@ zarr_store: "zip" # "zarr" for LocalStore, "zip" for ZipStore
 general:
 
   # mutable parameters
-  # istep: 0
+  istep: 0
   rank: ???
   world_size: ???
 
@@ -125,7 +125,7 @@ train_log_freq:
 # parameters for data loading
 data_loading :
 
-  num_workers: 12
+  num_workers: 16
   rng_seed: ???
   repeat_data_in_mini_epoch : False
 
@@ -185,7 +185,7 @@ training_config:
   forecast :
       time_step: 06:00:00
       offset: 1
-      num_steps: 2
+      num_steps: 8
       policy: "fixed"
 
 
