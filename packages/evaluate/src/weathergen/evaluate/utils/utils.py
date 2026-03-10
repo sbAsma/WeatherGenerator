@@ -403,6 +403,7 @@ def plot_data(reader: Reader, stream: str, global_plotting_opts: dict) -> None:
         Dictionary containing all plotting options that apply globally to all run_ids
     """
     run_id = reader.run_id
+    _logger.info(f"Starting plot_data for {run_id} - {stream}")
 
     # get stream dict from evaluation config (assumed to be part of cfg at this point)
     stream_cfg = reader.get_stream(stream)
@@ -419,6 +420,7 @@ def plot_data(reader: Reader, stream: str, global_plotting_opts: dict) -> None:
             or plot_settings.get("plot_animations", False)
         )
     ):
+        _logger.info(f"No plotting requested for {run_id} - {stream}")
         return
 
     plotter_cfg = {
@@ -517,6 +519,7 @@ def plot_data(reader: Reader, stream: str, global_plotting_opts: dict) -> None:
         if plot_target:
             plotter.animation(plot_samples, plot_fsteps, plot_chs, data_selection, "targets")
 
+    _logger.info(f"Finished plot_data for {run_id} - {stream}")
     return
 
 

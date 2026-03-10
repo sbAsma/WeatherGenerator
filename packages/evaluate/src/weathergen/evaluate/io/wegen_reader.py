@@ -59,7 +59,7 @@ class WeatherGenReader(Reader):
             self.eval_cfg.get("metrics_base_dir", self.results_base_dir)
         )  # base directory where score files will be stored
 
-        self.step_hrs = self.inference_cfg.get("step_hrs", 1)
+        self.step_hrs = self.inference_cfg.get("step_hrs", self.eval_cfg.get("step_hrs", 1))
 
         self.results_dir, self.runplot_dir = (
             Path(self.results_base_dir),
@@ -322,8 +322,8 @@ class WeatherGenZarrReader(WeatherGenReader):
             ):
                 self.fname_zarr = fname_zarr
         else:
-            _logger.error(f"Zarr file {self.fname_zarr} does not exist.")
-            raise FileNotFoundError(f"Zarr file {self.fname_zarr} does not exist")
+            _logger.error(f"Zarr file {fname_zarr} does not exist.")
+            raise FileNotFoundError(f"Zarr file {fname_zarr} does not exist")
 
     def get_data(
         self,
