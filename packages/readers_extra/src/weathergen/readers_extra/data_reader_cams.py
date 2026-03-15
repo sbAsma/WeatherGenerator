@@ -88,6 +88,9 @@ class DataReaderCams(DataReaderTimestep):
         start_ds = np.datetime64(self.time[0])
         end_ds = np.datetime64(self.time[-1])
         self.temporal_frequency = self.time[1] - self.time[0]
+        # native spacing in hours, allow stream_info to override
+        default_step = int(self.temporal_frequency / np.timedelta64(1, "h"))
+        self.step_hrs = stream_info.get("step_hrs", default_step)
 
         if start_ds > tw_handler.t_end or end_ds < tw_handler.t_start:
             # print("inside skipping stream")
@@ -113,12 +116,10 @@ class DataReaderCams(DataReaderTimestep):
         # Number of time steps in selected range
         self.len = self.end_idx - self.start_idx + 1
 
-        # Placeholder; currently unused
-        self.step_hrs = 1
-
         # Stream metadata
         self.properties = {
             "stream_id": 0,
+            "time_window_len_hours": self.step_hrs,
         }
 
         # === Normalization statistics ===
@@ -205,24 +206,33 @@ class DataReaderCams(DataReaderTimestep):
             Structured data containing coordinates, metadata, variable data, and timestamps
         """
         (t_idxs, dtr) = self._get_dataset_idxs(idx)
-        # if self.stream_info == "CAMSANALYSIS":
-        #     _logger.info(f"Extracting stream {self.stream_info['name']} data for time indices: {dtr}")
 
         # Return empty data if dataset is unavailable or no valid time indices
         if self.ds is None or self.len == 0 or len(t_idxs) == 0:
-            # _logger.info(f"{self.stream_info['name']} dataset unavailable or no valid time indices. Returning empty data.")
-            
             return ReaderData.empty(
                 num_data_fields=len(channels_idx), num_geo_fields=len(self.geoinfo_idx)
             )
 
         assert t_idxs[0] >= 0, "index must be non-negative"
 
-        # Define temporal slice bounds (t1 is exclusive)
-        t0 = t_idxs[0]
-        t1 = t_idxs[-1] + 1
-        t_idxs_diff = t1 - t0
+        # ------------------------------------------------------------------
+        # apply step‑hour filter before touching the zarr store; this keeps
+        # the number of time slices that are actually loaded to a minimum.
+        if self.step_hrs > 1:
+            times_window = self.time[t_idxs]
+            hours = (
+                (times_window.astype("datetime64[h]") - times_window.astype("datetime64[D]"))
+                / np.timedelta64(1, "h")
+            ).astype(int)
+            mask = (hours % self.step_hrs) == 0
+            t_idxs = t_idxs[mask]
 
+        if len(t_idxs) == 0:
+            return ReaderData.empty(
+                num_data_fields=len(channels_idx), num_geo_fields=len(self.geoinfo_idx)
+            )
+
+        t_n = len(t_idxs)
         # Grid dimensions
         nlat = len(self.lat)
         nlon = len(self.lon)
@@ -242,16 +252,17 @@ class DataReaderCams(DataReaderTimestep):
                     pressure_level = int(ch_parts[1])
                     data_lazy = (
                         self.ds[variable_name]
-                        .sel(isobaricInhPa=pressure_level)[t0:t1, :, :]
+                        .sel(isobaricInhPa=pressure_level)
+                        .isel(time=t_idxs)
                         .astype("float32")
                     )
                 # Surface variables: extract directly (e.g., "surface_pressure")
                 else:
-                    data_lazy = self.ds[ch][t0:t1, :, :].astype("float32")
+                    data_lazy = self.ds[ch].isel(time=t_idxs).astype("float32")
 
                 # Compute and flatten spatial dimensions: (time, lat, lon) -> (time, grid_points)
                 data = data_lazy.compute(scheduler="synchronous").values
-                data_per_channel.append(data.reshape(t_idxs_diff, nlat * nlon))
+                data_per_channel.append(data.reshape(t_n, nlat * nlon))
 
         except Exception as e:
             _logger.info(f"Date not present in CAMS dataset: {str(e)}. Skipping.")
@@ -269,7 +280,7 @@ class DataReaderCams(DataReaderTimestep):
         # channel values
         data = (
             np.transpose(data_stacked, (0, 2, 1))
-            .reshape(t_idxs_diff * (nlat * nlon), len(channels))
+            .reshape(t_n * (nlat * nlon), len(channels))
             .astype(np.float32)
         )
 
@@ -281,10 +292,10 @@ class DataReaderCams(DataReaderTimestep):
         latlon_flat = np.column_stack(
             [lat2d.ravel(order="C"), lon2d.ravel(order="C")]
         )  # (grid_points, 2)
-        coords = np.vstack([latlon_flat] * t_idxs_diff)  # (time*grid_points, 2)
+        coords = np.vstack([latlon_flat] * t_n)  # (time*grid_points, 2)
 
         # Create datetime array: repeat each timestamp for all spatial grid points
-        datetimes = np.repeat(self.time[t0:t1], total_grid)
+        datetimes = np.repeat(self.time[t_idxs], total_grid)
 
         # Empty geo-information array (placeholder for compatibility)
         geoinfos = np.zeros((data.shape[0], 0), dtype=np.float32)

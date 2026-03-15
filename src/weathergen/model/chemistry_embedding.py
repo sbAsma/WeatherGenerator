@@ -1,11 +1,8 @@
-"""
-Chemistry stream embedding with ABP pre-reduction.
-Integrates into WeatherGenerator embedding pipeline.
-"""
+"""Chemistry stream embedding with GNN-based pre-reduction."""
 
 import torch
 import torch.nn as nn
-from weathergen.model.abp import ChannelStackedABP
+from weathergen.model.gnn_reduction import GridGNNChemistryReducer
 
 
 class ChemistryStreamEmbedding(nn.Module):
@@ -18,31 +15,27 @@ class ChemistryStreamEmbedding(nn.Module):
     
     def __init__(
         self,
-        n_species: int = 50,
-        n_levels: int = 25,
-        n_emissions: int = 10,
-        spatial_h: int = 100,
-        spatial_w: int = 100,
-        d_embedding: int = 512,
-        d_intermediate: int = 1800,
-        n_inducing: int = 64,
+        n_species: int,
+        n_levels: int,
+        n_emissions: int,
+        d_embedding: int,
+        gnn_hidden_dim: int,
+        gnn_num_layers: int,
+        gnn_edge_k: int,
+        gnn_dropout_rate: float,
+        gnn_pool: str,
     ):
         super().__init__()
-        
-        self.abp = ChannelStackedABP(
-            n_species=n_species,
-            n_levels=n_levels,
-            n_emissions=n_emissions,
-            spatial_h=spatial_h,
-            spatial_w=spatial_w,
-            d_model=d_intermediate,
-            n_inducing=n_inducing
-        )
-        
-        # Project to final embedding dimension
-        self.proj = nn.Sequential(
-            nn.Linear(d_intermediate, d_embedding),
-            nn.LayerNorm(d_embedding)
+
+        c_in = n_species * n_levels + n_emissions
+        self.reducer = GridGNNChemistryReducer(
+            c_in=c_in,
+            d_hidden=gnn_hidden_dim,
+            d_out=d_embedding,
+            num_layers=gnn_num_layers,
+            edge_k=gnn_edge_k,
+            dropout_rate=gnn_dropout_rate,
+            pool=gnn_pool,
         )
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -50,6 +43,4 @@ class ChemistryStreamEmbedding(nn.Module):
         x: (B, H, W, C_in)
         output: (B, d_embedding)
         """
-        reduced = self.abp(x)  # (B, d_intermediate)
-        embedded = self.proj(reduced)  # (B, d_embedding)
-        return embedded
+        return self.reducer(x)

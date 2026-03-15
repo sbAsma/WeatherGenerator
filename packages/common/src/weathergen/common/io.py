@@ -8,25 +8,36 @@
 # nor does it submit to any jurisdiction.
 
 import dataclasses
+import enum
 import functools
 import itertools
 import logging
 import pathlib
+import timeit
 import typing
+import warnings
 
 import dask.array as da
 import numpy as np
+import pandas as pd
 import xarray as xr
 import zarr
 from numpy import datetime64
 from numpy.typing import NDArray
+from tqdm import tqdm
+from zarr.errors import ZarrUserWarning
+from zarr.storage import LocalStore, ZipStore
+
+from pathlib import Path
 
 # experimental value, should be inferred more intelligently
-CHUNK_N_SAMPLES = 16392
+SHARDING_ENABLED = True
+SHARD_N_SAMPLES = 40320
+CHUNK_N_SAMPLES = SHARD_N_SAMPLES // 60
+SCALE_FACTOR = 4  # scaling for the other dimensions
 type DType = np.float32
 type NPDT64 = datetime64
 type ArrayType = zarr.Array | np.NDArray[DType]
-
 
 _logger = logging.getLogger(__name__)
 
@@ -34,6 +45,31 @@ _logger = logging.getLogger(__name__)
 def is_ndarray(obj: typing.Any) -> bool:
     """Check if object is an ndarray (wraps the linter warning)."""
     return isinstance(obj, (np.ndarray))  # noqa: TID251
+
+
+def _get_shards(
+    shard_nsamples: tuple[int], chunks: tuple[int]
+) -> tuple[tuple[int, ...], *tuple[int, ...]]:
+    """Helper function to find number of shards from chunks and predefined size of shards"""
+    shards = (shard_nsamples, *((SCALE_FACTOR + 1) * x for x in chunks[1:]))
+    return shards
+
+
+def _get_chunks(
+    chunk_nsamples: tuple[int], data_shape: tuple[int]
+) -> tuple[tuple[int, ...], *tuple[int, ...]]:
+    """Helper function to find chunks from shape of data and predefined size of chunks"""
+    chunks = (chunk_nsamples, *(max(x // SCALE_FACTOR, 1) for x in data_shape[1:]))
+    return chunks
+
+
+class StoreType(enum.StrEnum):
+    ZIP = "zip"
+    LOCAL = "zarr"
+
+    @classmethod
+    def extensions(cls) -> list[str]:
+        return [store_type.value for store_type in cls]
 
 
 class TimeRange:
@@ -100,6 +136,7 @@ class IOReaderData:
     geoinfos: NDArray[DType]
     data: NDArray[DType]
     datetimes: NDArray[NPDT64]
+    is_spoof: bool = False
 
     def is_empty(self):
         """
@@ -141,6 +178,7 @@ class IOReaderData:
         geoinfos = np.zeros((0, other.geoinfos.shape[1]), dtype=other.geoinfos.dtype)
         data = np.zeros((0, other.data.shape[1]), dtype=other.data.dtype)
         datetimes = np.array([], dtype=other.datetimes.dtype)
+        is_spoof = True
 
         for other in others:
             n_datapoints = len(other.data)
@@ -152,8 +190,9 @@ class IOReaderData:
             geoinfos = np.concatenate([geoinfos, other.geoinfos])
             data = np.concatenate([data, other.data])
             datetimes = np.concatenate([datetimes, other.datetimes])
+            is_spoof = is_spoof and other.is_spoof
 
-        return cls(coords, geoinfos, data, datetimes)
+        return cls(coords, geoinfos, data, datetimes, is_spoof)
 
 
 @dataclasses.dataclass
@@ -242,16 +281,33 @@ class OutputDataset:
             "geoinfo": self.geoinfo,
         }
 
+    @property
+    def metadata(self) -> dict[str, typing.Any]:
+        return {
+            "channels": self.channels,
+            "geoinfo_channels": self.geoinfo_channels,
+            "source_interval": self.source_interval.as_dict(),
+        }
+
     @functools.cached_property
     def datapoints(self) -> NDArray[np.int_]:
         return np.arange(self.data.shape[0])
 
-    def as_xarray(self, chunk_nsamples=CHUNK_N_SAMPLES) -> xr.DataArray:
+    def as_xarray(
+        self, chunk_nsamples=CHUNK_N_SAMPLES, shard_nsamples=SHARD_N_SAMPLES
+    ) -> xr.DataArray:
         """Convert raw dask arrays into chunked dask-aware xarray dataset."""
-        chunks = (chunk_nsamples, *self.data.shape[1:])
-
+        chunks = _get_chunks(chunk_nsamples, self.data.shape)
+        if SHARDING_ENABLED:
+            shards = _get_shards(shard_nsamples, chunks)
+            _logger.debug(f"sharding enabled with shards: {shards} and chunks: {chunks}")
+        else:
+            shards = None
+            _logger.debug(f"sharding disabled, using chunks: {chunks}")
         # maybe do dask conversion earlier? => usefull for parallel writing?
-        data = da.from_zarr(self.data, chunks=chunks)  # dont call compute to lazy load
+        data = da.from_zarr(
+            self.data, chunks=chunks, shards=shards
+        )  # dont call compute to lazy load
         # include pseudo ens dim so all data arrays have same dimensionality
         # TODO: does it make sense for target and source to have ens dim?
         additional_dims = (0, 1, 2) if len(data.shape) == 3 else (0, 1, 2, 5)
@@ -314,23 +370,51 @@ class OutputItem:
 class ZarrIO:
     """Manage zarr storage hierarchy."""
 
-    def __init__(self, store_path: pathlib.Path):
+    def __init__(self, store_path: pathlib.Path, read_only: bool):
+        self._store: LocalStore | ZipStore | None = None
         self._store_path = store_path
         self.data_root: zarr.Group | None = None
+        self.read_only = read_only
+
+    @property
+    def _mode(self):
+        return "r" if self.read_only else "a"
+        # TODO: append is more permissive, but there is a cost in opening and closing the store.
+        # mode = "a" required for fix that removes ZarrIO dependency in trainer.py
 
     def __enter__(self) -> typing.Self:
-        self._store = zarr.storage.DirectoryStore(self._store_path)
-        self.data_root = zarr.group(store=self._store)
+        # Capture warnings emitted during store creation/open
+        with warnings.catch_warnings(record=True) as caught:
+            self._store = LocalStore(self._store_path)
+            self.data_root = zarr.group(store=self._store)
+        # Warns user of future deprecation only if a ZarrUserWarning was raised
+        # Support for existing Zarr2 stores will be removed in future versions
+        if any(issubclass(w.category, ZarrUserWarning) for w in caught):
+            last_msg = next(
+                (
+                    str(w.message)
+                    for w in reversed(caught)
+                    if issubclass(w.category, ZarrUserWarning)
+                ),
+                "",
+            )
+            _logger.warning(
+                f"Future Deprecation, error arises from opening older Zarr2 stores:\
+                    {last_msg}, Opened local zarr store"
+            )
 
         return self
 
     def __exit__(self, exc_type, exc_value, exc_tb):
-        self._store.close()
+        if self._store is not None:
+            self._store.close()
 
     def write_zarr(self, item: OutputItem):
         """Write one output item to the zarr store."""
         group = self._get_group(item.key, create=True)
-        for dataset in item.datasets:
+        for dataset in tqdm(item.datasets):  # pyrefly: ignore[not-iterable]
+            # pyrefly doesn't recognize that tqdm makes item.datasets iterable
+            # until fixed, ignore the warning here
             if dataset is not None:
                 self._write_dataset(group, dataset)
 
@@ -347,7 +431,7 @@ class ZarrIO:
         return OutputItem(key=key, forecast_offset=self.forecast_offset, **datasets)
 
     def _get_datasets(self, key: ItemKey):
-        group = self._get_group(key)
+        group = self._get_group(key, create=False)
         return {
             name: OutputDataset.create(
                 name, key, dict(dataset.arrays()), dict(dataset.attrs).copy()
@@ -355,13 +439,14 @@ class ZarrIO:
             for name, dataset in group.groups()
         }
 
-    def _get_group(self, item: ItemKey, create: bool = False) -> zarr.Group:
+    def _get_group(self, item: ItemKey, create: bool) -> zarr.Array | zarr.Group:
         assert self.data_root is not None, "ZarrIO must be opened before accessing data."
-        group: zarr.Group | None
         if create:
+            assert self.data_root.get(item.path) is None, "Group already exists, stop overwriting"
             group = self.data_root.create_group(item.path)
         else:
             try:
+                #####WARNING IS APPEARING HERE TOO#####
                 group = self.data_root.get(item.path)
                 assert group is not None, f"Zarr group: {item.path} does not exist."
             except KeyError as e:
@@ -372,14 +457,9 @@ class ZarrIO:
         return group
 
     def _write_dataset(self, item_group: zarr.Group, dataset: OutputDataset):
-        dataset_group = item_group.require_group(dataset.name)
-        self._write_metadata(dataset_group, dataset)
+        assert dataset.name not in list(item_group.keys()), "No duplication allowed"
+        dataset_group = item_group.create_group(dataset.name, attributes=dataset.metadata)
         self._write_arrays(dataset_group, dataset)
-
-    def _write_metadata(self, dataset_group: zarr.Group, dataset: OutputDataset):
-        dataset_group.attrs["channels"] = dataset.channels
-        dataset_group.attrs["geoinfo_channels"] = dataset.geoinfo_channels
-        dataset_group.attrs["source_interval"] = dataset.source_interval.as_dict()
 
     def _write_arrays(self, dataset_group: zarr.Group, dataset: OutputDataset):
         for array_name, array in dataset.arrays.items():  # suffix is eg. data or coords
@@ -387,15 +467,25 @@ class ZarrIO:
 
     def _create_dataset(self, group: zarr.Group, name: str, array: NDArray):
         assert is_ndarray(array), f"Expected ndarray but got: {type(array)}"
+
         if array.size == 0:  # sometimes for geoinfo
-            chunks = None
+            chunks = "auto"
         else:
-            chunks = (CHUNK_N_SAMPLES, *array.shape[1:])
+            chunks = _get_chunks(CHUNK_N_SAMPLES, array.shape)
         _logger.debug(
             f"writing array: {name} with shape: {array.shape},chunks: {chunks}"
-            + "into group: {group}."
+            + f"into group: {group}."
         )
-        group.create_dataset(name, data=array, chunks=chunks)
+        start_time = timeit.default_timer()
+        if SHARDING_ENABLED and chunks != "auto":
+            shards = _get_shards(SHARD_N_SAMPLES, chunks)
+            group.create_array(name, data=array, chunks=chunks, shards=shards)
+            _logger.debug(f"sharding enabled with shards: {shards} and chunks: {chunks}")
+        else:
+            group.create_array(name, data=array, chunks=chunks)
+            _logger.debug(f"sharding disabled, writing with chunks: {chunks}")
+        elapsed = timeit.default_timer() - start_time
+        _logger.debug(f"writing array: {name} took {elapsed:.2f}")
 
     @functools.cached_property
     def forecast_offset(self) -> int:
@@ -433,11 +523,24 @@ class ZarrIO:
         _, example_sample = next(self.data_root.groups())
         _, example_stream = next(example_sample.groups())
 
-        all_steps = list(example_stream.group_keys())
+        all_steps = sorted(list(example_stream.group_keys()))
+
         if self.forecast_offset == 1:
             return all_steps[1:]  # exclude fstep with no targets/preds
         else:
             return all_steps
+
+
+class ZipZarrIO(ZarrIO):
+    def __enter__(self) -> typing.Self:
+        _logger.info(f"Opening zipstore, read-only: {self.read_only}")
+        self._store = ZipStore(self._store_path, mode=self._mode, read_only=self.read_only)
+        if self.read_only:
+            self.data_root = zarr.open_group(store=self._store, mode=self._mode)
+        else:
+            self.data_root = zarr.group(store=self._store)
+
+        return self
 
 
 @dataclasses.dataclass
@@ -475,7 +578,7 @@ class OutputBatchData:
     # fstep, stream, redundant dim (size 1)
     targets_lens: list[list[list[int]]]
 
-    # stream name: index into data (only streams in analysis_streams_output)
+    # stream name: index into data (only streams in streams_output)
     streams: dict[str, int]
 
     # stream, channel name
@@ -567,10 +670,10 @@ class OutputBatchData:
             target_data = np.zeros((0, len(self.target_channels[stream_idx])), dtype=np.float32)
             preds_data = np.zeros((0, len(self.target_channels[stream_idx])), dtype=np.float32)
         else:
-            target_data = self.targets[offset_key.forecast_step][stream_idx][0][datapoints]
-            preds_data = self.predictions[offset_key.forecast_step][stream_idx][0].transpose(
-                1, 2, 0
-            )[datapoints]
+            target_data = self.targets[offset_key.forecast_step][stream_idx][datapoints]
+            preds_data = self.predictions[offset_key.forecast_step][stream_idx].transpose(1, 2, 0)[
+                datapoints
+            ]
 
         assert len(data_coords.channels) == target_data.shape[1], (
             "Number of channel names does not align with target data."
@@ -615,7 +718,7 @@ class OutputBatchData:
         return slice(start, start + n_samples)
 
     def _extract_coordinates(self, stream_idx, offset_key, datapoints) -> DataCoordinates:
-        _coords = self.targets_coords[offset_key.forecast_step][stream_idx][datapoints].numpy()
+        _coords = self.targets_coords[offset_key.forecast_step][stream_idx][datapoints]
 
         # ensure _coords has size (?,2)
         if len(_coords) == 0:
@@ -646,7 +749,7 @@ class OutputBatchData:
         source: IOReaderData = self.sources[sample][stream_idx]
 
         assert source.data.shape[1] == len(channels), (
-            "Number of source channel names does not align with source data"
+            f"Number of source channel names {len(channels)} does not align with source data."
         )
 
         source_dataset = OutputDataset(
@@ -664,3 +767,246 @@ class OutputBatchData:
         _logger.debug(f"source shape: {source_dataset.data.shape}")
 
         return source_dataset
+
+
+def zarrio_reader(store_path: pathlib.Path) -> ZarrIO:
+    """
+    Get the proper io-reader for a given store.
+
+    Args:
+        store_path: Full path to the storage location.
+    """
+
+    return _get_backend(store_path, read_only=True)
+
+
+def zarrio_writer(store_path: pathlib.Path) -> ZarrIO:
+    """
+    Get the proper io-writer for a given store.
+
+    Args:
+        store_path: Full path to the storage location.
+    """
+
+    return _get_backend(store_path, read_only=False)
+
+
+_IO_CLASSES: dict[StoreType, type] = {StoreType.ZIP: ZipZarrIO, StoreType.LOCAL: ZarrIO}
+
+
+def _get_backend(store_path: pathlib.Path, read_only: bool) -> ZarrIO:
+    """Get the proper io backend for a given store."""
+    ext = store_path.suffix[1:]
+    return _IO_CLASSES[StoreType(ext)](store_path, read_only)
+
+
+from scipy.interpolate import RegularGridInterpolator
+
+class CAMSForecastReader:
+    """Reader class for CAMS forecast data stored in Zarr format"""
+    def __init__(self, eval_cfg: dict):
+        """
+        Initialize the CAMSForecastReader.
+
+        Parameters
+        ----------
+        eval_cfg: dict
+            The evaluation configuration dictionary.
+        run_id: str
+            The run ID.
+        private_paths: dict | None
+            Private paths configuration, if any.
+        """
+        from weathergen.datasets.data_reader_anemoi import _clip_lat, _clip_lon  # Moved here to avoid circular import
+        # super().__init__(eval_cfg, run_id, private_paths)
+        self.eval_cfg = eval_cfg
+        logging.info(f"Initializing CAMSForecastReader with config: {eval_cfg}")
+        self.cams_base_dir = Path(self.eval_cfg.get("cams_base_dir"))
+        filename = self.cams_base_dir / "cams_forecast_co_data_2016.zarr"
+        ds_surface = xr.open_zarr(filename, group="surface", chunks={"time": 24})
+        ds_profiles = xr.open_zarr(filename, group="profiles", chunks={"time": 24})
+
+        # merge along variables
+        self.ds = xr.merge([ds_surface, ds_profiles])
+        self.channels = {
+            'surface': ["pm1", "pm2p5", "pm10"],
+            'tc': ["tc_co", "tc_no", "tc_no2", "tc_so2", "tc_o3"],
+            # note: some profile variables are not listed automatically, add extras here
+            'profiles': ["so2", "o3", "co", "no", "no2", "go3"],
+        }
+        self.pressure_levels = [
+            "50",
+            "100",
+            "150",
+            "200",
+            "250",
+            "300",
+            "400",
+            "500",
+            "600",
+            "700",
+            "850",
+            "925",
+            "1000",
+        ]
+        lat_raw = _clip_lat(self.ds["latitude"].values)
+        lon_raw = _clip_lon(self.ds["longitude"].values)
+
+        # RegularGridInterpolator needs strictly monotonic axes
+        lat_order = np.argsort(lat_raw)
+        lon_order = np.argsort(lon_raw)
+        self.lat = lat_raw[lat_order]
+        self.lon = lon_raw[lon_order]
+        self._lat_order = lat_order
+        self._lon_order = lon_order
+
+        self.time = self.ds["time"].values
+        self.forecast_steps = np.unique(self.ds["step"].values)
+        self.regrid_data = self.eval_cfg.get("regrid_forecast", False)
+
+    def _sort_data(self, data: np.ndarray) -> np.ndarray:
+        """Re-order the lat/lon axes of *data* to match the sorted source grid."""
+        # data is expected to have shape (..., n_lat, n_lon)
+        return data[..., self._lat_order, :][..., :, self._lon_order]
+
+    def get_data(self, ch_: str, step: int | None = None, target_lat: np.ndarray | None = None, target_lon: np.ndarray | None = None) -> np.ndarray:
+        """
+        Retrieve the data for a given channel, optionally regridded to a target grid.
+
+        If *target_lat* / *target_lon* are 1-D arrays of irregular (scatter)
+        coordinates, the data is interpolated at those points and returned as a
+        1-D array.  If they describe a regular grid the result is a 2-D
+        ``xr.DataArray``.
+
+        Parameters
+        ----------
+        ch_: str
+            The channel name to retrieve data for.
+        step: int | None
+            Forecast step (in hours) to select.  When ``None`` the first
+            available step is used (legacy behaviour).
+        target_lat: np.ndarray | None
+            Target latitude values for regridding / interpolation.
+        target_lon: np.ndarray | None
+            Target longitude values for regridding / interpolation.
+
+        Returns
+        -------
+        np.ndarray
+            The data array for the specified channel.
+        """
+        # first try using the channel name verbatim (surface or tc variables
+        # and also combined names like 'tc_co' live in the merged dataset).
+        if ch_ in self.ds:
+            da = self.ds[ch_]
+        else:
+            # fall back to splitting for profile variables such as 'co_500'
+            ch_parts = ch_.split("_")
+            if len(ch_parts) != 2:
+                raise ValueError(f"Channel {ch_} not found in CAMS dataset.")
+            var, level = ch_parts[0], ch_parts[1]
+            if var in self.channels['profiles'] and level in self.pressure_levels:
+                da = self.ds[var].sel(isobaricInhPa=level)
+            else:
+                raise ValueError(f"Channel {ch_} not found in CAMS dataset.")
+
+        # Select the requested forecast step before converting to numpy.
+        # The CAMS zarr stores `step` as timedelta, so convert hours → Timedelta.
+        if step is not None and "step" in da.dims:
+            da = da.sel(step=pd.Timedelta(hours=int(step)))
+
+        data = da.values
+
+        # Re-order to match the sorted lat/lon axes
+        data = self._sort_data(data)
+
+        if target_lat is not None and target_lon is not None:
+            data = self.regrid_to_scatter(data, target_lat, target_lon)
+        elif self.regrid_data:
+            raise ValueError("Target latitude and longitude must be provided for regridding.")
+        else:
+            _logger.debug("Regridding is disabled, returning original data.")
+
+        return data
+
+    def regrid_to_scatter(self, data: np.ndarray, target_lat: np.ndarray, target_lon: np.ndarray) -> np.ndarray:
+        """
+        Interpolate *data* (on the sorted CAMS regular grid) at arbitrary
+        (lat, lon) scatter points.
+
+        Parameters
+        ----------
+        data : np.ndarray
+            Source data on the regular CAMS grid (shape ``(..., n_lat, n_lon)``).
+        target_lat : np.ndarray
+            1-D array of target latitude values.
+        target_lon : np.ndarray
+            1-D array of target longitude values.
+
+        Returns
+        -------
+        np.ndarray
+            Interpolated values at the target points (1-D, same length as
+            *target_lat*).
+        """
+        # Collapse any leading dimensions (e.g. time) — take the first slice
+        while data.ndim > 2:
+            data = data[0]
+
+        interpolator = RegularGridInterpolator(
+            (self.lat, self.lon),
+            data,
+            method='linear',
+            bounds_error=False,
+            fill_value=np.nan,
+        )
+
+        target_points = np.column_stack([target_lat, target_lon])
+        return interpolator(target_points)
+
+    def regrid_to_target(self, data: np.ndarray, target_lat: np.ndarray, target_lon: np.ndarray) -> xr.DataArray:
+        """
+        Regrid the input data to a *regular* target latitude/longitude grid.
+
+        Parameters
+        ----------
+        data: np.ndarray
+            The input data array to be regridded.
+        target_lat: np.ndarray
+            Sorted 1-D array of target latitude grid values.
+        target_lon: np.ndarray
+            Sorted 1-D array of target longitude grid values.
+
+        Returns
+        -------
+        xr.DataArray
+            The regridded data array on the target grid.
+        """
+        # Collapse any leading dimensions
+        while data.ndim > 2:
+            data = data[0]
+
+        interpolator = RegularGridInterpolator(
+            (self.lat, self.lon),
+            data,
+            method='linear',
+            bounds_error=False,
+            fill_value=np.nan,
+        )
+
+        target_lat_sorted = np.sort(target_lat)
+        target_lon_sorted = np.sort(target_lon)
+        target_lon_grid, target_lat_grid = np.meshgrid(target_lon_sorted, target_lat_sorted)
+        target_points = np.column_stack([target_lat_grid.ravel(), target_lon_grid.ravel()])
+        forecast_regridded_values = interpolator(target_points).reshape(
+            len(target_lat_sorted), len(target_lon_sorted)
+        )
+
+        forecast_regridded = xr.DataArray(
+            forecast_regridded_values,
+            coords={'latitude': target_lat_sorted, 'longitude': target_lon_sorted},
+            dims=['latitude', 'longitude'],
+        )
+
+        return forecast_regridded   
+
