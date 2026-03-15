@@ -35,19 +35,19 @@ from weathergen.utils.utils import get_dtype
 class EmbeddingEngine(torch.nn.Module):
     name: "EmbeddingEngine"
 
-    def __init__(self, cf: Config, sources_size, chemistry_embedding=None) -> None:
+    def __init__(self, cf: Config, sources_size, gnn_reducers=None) -> None:
         """
         Initialize the EmbeddingEngine with the configuration.
 
         :param cf: Configuration object containing parameters for the engine.
         :param sources_size: List of source sizes for each stream.
-        :param chemistry_embedding: Optional chemistry embedding function.
+        :param gnn_reducers: Optional dict mapping stream names to GNN reducer modules.
         """
         super(EmbeddingEngine, self).__init__()
         self.cf = cf
         self.dtype = get_dtype(self.cf.mixed_precision_dtype)
         self.sources_size = sources_size
-        self.chemistry_embedding = chemistry_embedding
+        self.gnn_reducers = gnn_reducers or {}
         self.embeds = torch.nn.ModuleDict()
         self.stream_names = [str(stream_cfg["name"]) for stream_cfg in cf.streams]
 
@@ -57,11 +57,14 @@ class EmbeddingEngine(torch.nn.Module):
                 continue
 
             if si["embed"]["net"] == "transformer":
+                # If a GNN reducer targets this stream, use its latent_dim
+                gnn = self.gnn_reducers.get(stream_name)
+                num_ch = gnn.latent_dim if gnn is not None else self.sources_size[i]
                 self.embeds[stream_name] = StreamEmbedTransformer(
                     mode=self.cf.embed_orientation,
                     num_tokens=si["embed"]["num_tokens"],
                     token_size=si["token_size"],
-                    num_channels=self.sources_size[i],
+                    num_channels=num_ch,
                     dim_embed=si["embed"]["dim_embed"],
                     dim_out=self.cf.ae_local_dim_embed,
                     num_blocks=si["embed"]["num_blocks"],

@@ -197,16 +197,10 @@ def run_train(args):
     )
     cf = config.set_run_id(cf, args.run_id, False)
 
-<<<<<<< HEAD
-    cf.data_loader_rng_seed = int(time.time())
-    cf.loss_fcts_val = [["mse", 1.0]]
-    cf.loss_fcts = [["mse", 1.0]]
-    devices = Trainer.init_torch()
-=======
     cf.data_loading.rng_seed = int(time.time())
     mp_method = cf.general.get("multiprocessing_method", "fork")
     devices = Trainer.init_torch(multiprocessing_method=mp_method)
->>>>>>> CAMS/mk/develop/forecast_release_v0
+
     cf = Trainer.init_ddp(cf)
 
     # this line should probably come after the processes have been sorted out else we get lots

@@ -251,10 +251,8 @@ wgtags:
 
 
 ###############################################################
-### Chemistry dim red
+### GNN-based channel reducer for CAMS streams
 #################################################################
-
-enable_chemistry_embedding: true
 
 gnn_reducer:
   enable: true
@@ -265,6 +263,3 @@ gnn_reducer:
   hidden_dim: 128
   n_layers: 3
   k_neighbors: 8
-
-
-#################################################################

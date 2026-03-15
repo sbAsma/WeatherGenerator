@@ -40,7 +40,7 @@ from weathergen.train.utils import get_batch_size_from_config
 from weathergen.utils.distributed import is_root
 from weathergen.utils.utils import get_dtype, is_stream_forcing
 
-from weathergen.model.chemistry_embedding import ChemistryStreamEmbedding
+from weathergen.model.gnn_reducer import CAMSGraphReducer
 
 logger = logging.getLogger(__name__)
 
@@ -319,30 +319,22 @@ class Model(torch.nn.Module):
         self.targets_num_channels = targets_num_channels
         self.targets_coords_size = targets_coords_size
 
-        # Chemistry embedding for CAMS data (optional)
-        if hasattr(cf, "enable_chemistry_embedding") and cf.enable_chemistry_embedding:
-            if not hasattr(cf, "chemistry_reduction"):
-                raise ValueError("Missing 'chemistry_reduction' block while chemistry embedding is enabled.")
-
-            cr = cf.chemistry_reduction
-            if cr.method != "gnn_based":
-                raise ValueError(
-                    f"Unsupported chemistry_reduction.method '{cr.method}'. Only 'gnn_based' is supported."
-                )
-
-            self.cams_chemistry_embedding = ChemistryStreamEmbedding(
-                n_species=cr.n_species,
-                n_levels=cr.n_levels,
-                n_emissions=cr.n_emissions,
-                d_embedding=cr.d_embedding,
-                gnn_hidden_dim=cr.gnn_hidden_dim,
-                gnn_num_layers=cr.gnn_num_layers,
-                gnn_edge_k=cr.gnn_edge_k,
-                gnn_dropout_rate=cr.gnn_dropout_rate,
-                gnn_pool=cr.gnn_pool,
+        # GNN-based channel reducer for CAMS streams (optional)
+        gnn_cfg = cf.get("gnn_reducer", {})
+        if gnn_cfg.get("enable", False):
+            self.gnn_target_streams = list(gnn_cfg.target_streams)
+            self.cams_gnn_reducer = CAMSGraphReducer(
+                healpix_level=cf.healpix_level,
+                n_channels=gnn_cfg.n_channels,
+                token_size=gnn_cfg.token_size,
+                latent_dim=gnn_cfg.latent_dim,
+                hidden_dim=gnn_cfg.get("hidden_dim", 128),
+                n_layers=gnn_cfg.get("n_layers", 3),
+                k_neighbors=gnn_cfg.get("k_neighbors", 8),
             )
         else:
-            self.cams_chemistry_embedding = None
+            self.gnn_target_streams = []
+            self.cams_gnn_reducer = None
 
         self.embed_target_coords = None
         self.encoder: EncoderModule | None = None
@@ -394,8 +386,15 @@ class Model(torch.nn.Module):
         """Create each individual module of the model"""
         cf = self.cf
 
+        # Build a dict mapping stream names → GNN reducer for the EmbeddingEngine
+        gnn_reducers: dict[str, CAMSGraphReducer] = {}
+        if self.cams_gnn_reducer is not None:
+            for s_name in self.gnn_target_streams:
+                gnn_reducers[s_name] = self.cams_gnn_reducer
+
         self.encoder = EncoderModule(
-            cf, self.sources_size, self.targets_num_channels, self.targets_coords_size
+            cf, self.sources_size, self.targets_num_channels, self.targets_coords_size,
+            gnn_reducers=gnn_reducers,
         )
 
         mode_cfg = cf.training_config
@@ -640,6 +639,54 @@ class Model(torch.nn.Module):
             z_pre_norm=tokens,
         )
 
+    def setup_gnn(self, device: torch.device) -> None:
+        """Precompute the HEALPix KNN graph on the target device.
+
+        Must be called once after the model is moved to its device.
+        """
+        if self.cams_gnn_reducer is not None:
+            self.cams_gnn_reducer.precompute_graph(device)
+
+    def _apply_gnn_reducer(self, batch: ModelBatch) -> None:
+        """Run the GNN reducer on targeted streams, replacing their tokens in-place.
+
+        For each targeted stream in the batch, this method:
+        1. Collects source tokens across input steps and samples.
+        2. Pools variable-length per-cell tokens into one vector per cell.
+        3. Runs the GNN forward pass.
+        4. Replaces stream source_tokens_cells with GNN output.
+        """
+        if self.cams_gnn_reducer is None:
+            return
+
+        num_steps_input = batch.get_num_steps()
+        n_cells = self.num_healpix_cells
+
+        for stream_name in self.gnn_target_streams:
+            for istep in range(num_steps_input):
+                for sample in batch.get_samples():
+                    sdata = sample.streams_data.get(stream_name)
+                    if sdata is None:
+                        continue
+                    tokens = sdata.source_tokens_cells[istep]
+                    if tokens is None or tokens.shape[0] == 0:
+                        continue
+
+                    # tokens: (total_tokens_this_sample, token_size, n_channels)
+                    # pool to cells using source_tokens_lens
+                    cell_lens = sdata.source_tokens_lens[istep]
+                    pooled = CAMSGraphReducer.pool_to_cells(tokens, cell_lens)
+                    # pooled: (n_cells, token_size, n_channels)
+
+                    reduced = self.cams_gnn_reducer(pooled)
+                    # reduced: (n_cells, token_size, latent_dim)
+
+                    # replace source tokens: now exactly 1 token per cell
+                    sdata.source_tokens_cells[istep] = reduced
+                    sdata.source_tokens_lens[istep] = torch.ones(
+                        n_cells, dtype=torch.int32, device=tokens.device
+                    )
+
     def forward(self, model_params: ModelParams, batch: ModelBatch) -> ModelOutput:
         """Forward pass of the model
 
@@ -652,6 +699,9 @@ class Model(torch.nn.Module):
         """
 
         output = ModelOutput(batch.get_output_len())
+
+        # Apply GNN reducer to targeted streams before embedding
+        self._apply_gnn_reducer(batch)
 
         tokens, posteriors = self.encoder(model_params, batch)
         output.add_latent_prediction(0, "posteriors", posteriors)

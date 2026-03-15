@@ -249,3 +249,18 @@ wgtags:
   # as strings by mlflow, so treat all extra tags as simple string key: value pairs.
   grid: null
 
+
+###############################################################
+### GNN-based channel reducer for CAMS streams
+#################################################################
+
+gnn_reducer:
+  enable: true
+  target_streams: ["CAMSANALYSIS", "CAMSEAC4"]
+  n_channels: 73
+  token_size: 16
+  latent_dim: 32        # 73 → 32 before StreamEmbedTransformer
+  hidden_dim: 128
+  n_layers: 3
+  k_neighbors: 8
+

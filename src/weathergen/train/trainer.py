@@ -50,6 +50,19 @@ from weathergen.utils.validation_io import write_output
 
 logger = logging.getLogger(__name__)
 
+
+def _has_nan(obj) -> bool:
+    """Recursively detect NaN/Inf in tensors, numpy arrays, and nested lists."""
+    if isinstance(obj, torch.Tensor):
+        return not torch.isfinite(obj).all()
+    if isinstance(obj, np.ndarray):
+        return not np.isfinite(obj).all()
+    if isinstance(obj, (list, tuple)):
+        return any(_has_nan(item) for item in obj)
+    if isinstance(obj, dict):
+        return any(_has_nan(v) for v in obj.values())
+    return False
+
 # cfg_keys_to_filter = ["losses", "model_input", "target_input"]
 
 
@@ -216,6 +229,9 @@ class Trainer(TrainerBase):
 
         self.loss_calculator_val = LossCalculator(cf, self.test_cfg, VAL, device=self.devices[0])
 
+        # Precompute GNN graph on the target device
+        self.model.setup_gnn(self.devices[0])
+
         if is_root():
             config.save(self.cf, mini_epoch=0)
 
@@ -312,7 +328,14 @@ class Trainer(TrainerBase):
             betas=(beta1, beta2),
             eps=eps,
         )
-        self.grad_scaler = torch.amp.GradScaler("cuda")
+        # Only use GradScaler for float16 mixed precision (not bfloat16)
+        if cf.with_mixed_precision and self.mixed_precision_dtype == torch.float16:
+            self.grad_scaler = torch.amp.GradScaler("cuda")
+        else:
+            self.grad_scaler = torch.amp.GradScaler("cuda", enabled=False)
+
+        # Precompute GNN graph on the target device
+        self.model.setup_gnn(self.devices[0])
 
         assert len(self.dataset) > 0, f"No data found in {self.dataset}"
 
@@ -415,13 +438,6 @@ class Trainer(TrainerBase):
 
         self.optimizer.zero_grad()
 
-<<<<<<< HEAD
-        # Unweighted loss, real weighted loss, std for losses that need it
-        self.loss_unweighted_hist, self.loss_model_hist, self.stdev_unweighted_hist = [], [], []
-        self.last_grad_norm = 0.0
-
-=======
->>>>>>> CAMS/mk/develop/forecast_release_v0
         # training loop
         self.t_start = time.time()
         for bidx, batch in enumerate(dataset_iter):

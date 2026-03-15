@@ -29,13 +29,14 @@ from weathergen.model.positional_encoding import positional_encoding_harmonic
 class EncoderModule(torch.nn.Module):
     name: "EncoderModule"
 
-    def __init__(self, cf: Config, sources_size, targets_num_channels, targets_coords_size) -> None:
+    def __init__(self, cf: Config, sources_size, targets_num_channels, targets_coords_size, gnn_reducers=None) -> None:
         """
         Initialize the EmbeddingEngine with the configuration.
 
         :param cf: Configuration object containing parameters for the engine.
         :param sources_size: List of source sizes for each stream.
         :param stream_names: Ordered list of stream identifiers aligned with cf.streams.
+        :param gnn_reducers: Optional dict mapping stream names to GNN reducer modules.
         """
         super(EncoderModule, self).__init__()
         self.cf = cf
@@ -59,7 +60,7 @@ class EncoderModule(torch.nn.Module):
         # determine stream names once so downstream components use consistent keys
         self.stream_names = [str(stream_cfg["name"]) for stream_cfg in cf.streams]
         # separate embedding networks for differnt observation types
-        self.embed_engine = EmbeddingEngine(cf, self.sources_size)
+        self.embed_engine = EmbeddingEngine(cf, self.sources_size, gnn_reducers=gnn_reducers)
 
         assert cf.ae_global_att_dense_rate == 1.0, "Local attention not adapted for register tokens"
         self.num_register_tokens = cf.num_register_tokens
