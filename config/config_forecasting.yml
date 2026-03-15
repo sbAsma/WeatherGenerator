@@ -140,7 +140,7 @@ training_config:
   samples_per_mini_epoch: 4096
   shuffle: True
 
-  start_date: 1979-01-01T00:00
+  start_date: 2017-01-01T00:00
   end_date: 2022-05-31T12:00
 
   time_window_step: 12:00:00
@@ -257,9 +257,7 @@ wgtags:
 gnn_reducer:
   enable: true
   target_streams: ["CAMSANALYSIS", "CAMSEAC4"]
-  n_channels: 73
-  token_size: 16
-  latent_dim: 32        # 73 → 32 before StreamEmbedTransformer
+  latent_dim: 32     
   hidden_dim: 128
   n_layers: 3
   k_neighbors: 8

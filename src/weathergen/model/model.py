@@ -21,7 +21,7 @@ import torch.nn as nn
 
 from weathergen.common.config import Config
 from weathergen.datasets.batch import ModelBatch
-from weathergen.datasets.utils import healpix_verts_rots, r3tos2
+from weathergen.datasets.utils import get_tokens_lens, healpix_verts_rots, r3tos2
 from weathergen.model.encoder import EncoderModule
 from weathergen.model.engines import (
     BilinearDecoder,
@@ -323,10 +323,37 @@ class Model(torch.nn.Module):
         gnn_cfg = cf.get("gnn_reducer", {})
         if gnn_cfg.get("enable", False):
             self.gnn_target_streams = list(gnn_cfg.target_streams)
+
+            # Derive token_size and in_features from the stream configs and
+            # sources_size so that manual n_channels config is not needed.
+            stream_names = [str(s["name"]) for s in cf.streams]
+            stream_idx = {name: i for i, name in enumerate(stream_names)}
+            token_sizes = {}
+            in_features_per_stream = {}
+            for name in self.gnn_target_streams:
+                idx = stream_idx[name]
+                token_sizes[name] = cf.streams[idx]["token_size"]
+                in_features_per_stream[name] = sources_size[idx]
+
+            unique_sizes = set(token_sizes.values())
+            if len(unique_sizes) != 1:
+                raise ValueError(
+                    f"GNN reducer target streams have inconsistent token_size: {token_sizes}"
+                )
+            token_size = unique_sizes.pop()
+
+            unique_in = set(in_features_per_stream.values())
+            if len(unique_in) != 1:
+                raise ValueError(
+                    f"GNN reducer target streams have inconsistent sources_size: {in_features_per_stream}"
+                )
+            # in_features for the linear projection = token_size * channels_per_point
+            in_features = token_size * unique_in.pop()
+
             self.cams_gnn_reducer = CAMSGraphReducer(
                 healpix_level=cf.healpix_level,
-                n_channels=gnn_cfg.n_channels,
-                token_size=gnn_cfg.token_size,
+                in_features=in_features,
+                token_size=token_size,
                 latent_dim=gnn_cfg.latent_dim,
                 hidden_dim=gnn_cfg.get("hidden_dim", 128),
                 n_layers=gnn_cfg.get("n_layers", 3),
@@ -686,6 +713,12 @@ class Model(torch.nn.Module):
                     sdata.source_tokens_lens[istep] = torch.ones(
                         n_cells, dtype=torch.int32, device=tokens.device
                     )
+
+        # Recompute batch.tokens_lens to reflect the updated source_tokens_lens
+        if self.gnn_target_streams:
+            batch.tokens_lens = get_tokens_lens(
+                self.cf.streams, batch, batch.get_num_steps()
+            )
 
     def forward(self, model_params: ModelParams, batch: ModelBatch) -> ModelOutput:
         """Forward pass of the model

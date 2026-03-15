@@ -37,7 +37,7 @@ def test_cams_graph_reducer_forward_finite():
 
     reducer = CAMSGraphReducer(
         healpix_level=level,
-        n_channels=n_channels,
+        in_features=token_size * n_channels,
         token_size=token_size,
         latent_dim=latent_dim,
         hidden_dim=hidden_dim,
@@ -64,7 +64,7 @@ def test_cams_graph_reducer_batched():
 
     reducer = CAMSGraphReducer(
         healpix_level=level,
-        n_channels=n_channels,
+        in_features=token_size * n_channels,
         token_size=token_size,
         latent_dim=latent_dim,
         hidden_dim=8,
@@ -87,7 +87,7 @@ def test_cams_graph_reducer_detects_nan():
 
     reducer = CAMSGraphReducer(
         healpix_level=level,
-        n_channels=4,
+        in_features=2 * 4,
         token_size=2,
         latent_dim=2,
         hidden_dim=8,
@@ -107,7 +107,7 @@ def test_cams_graph_reducer_no_precompute_raises():
     """Calling forward without precompute_graph raises RuntimeError."""
     reducer = CAMSGraphReducer(
         healpix_level=1,
-        n_channels=4,
+        in_features=2 * 4,
         token_size=2,
         latent_dim=2,
         hidden_dim=8,

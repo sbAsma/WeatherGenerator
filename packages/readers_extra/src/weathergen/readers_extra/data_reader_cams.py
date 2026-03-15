@@ -54,8 +54,8 @@ class DataReaderCams(DataReaderTimestep):
 
         # ======= Reading the Dataset ================
         # open groups
-        ds_surface = xr.open_zarr(filename, group="surface", chunks={"time": 24})
-        ds_profiles = xr.open_zarr(filename, group="profiles", chunks={"time": 24})
+        ds_surface = xr.open_zarr(filename, group="surface", chunks={"time": 24}, decode_timedelta=False)
+        ds_profiles = xr.open_zarr(filename, group="profiles", chunks={"time": 24}, decode_timedelta=False)
 
         # merge along variables
         self.ds = xr.merge([ds_surface, ds_profiles])

@@ -111,17 +111,17 @@ class GNNBlock(nn.Module):
         edge_msg = self.edge_norm(edge_msg)
         _check_finite(edge_msg, "GNNBlock.edge_msg")
 
-        # scatter-mean aggregate
-        agg = torch.zeros_like(x)
-        count = torch.zeros(x.shape[0], 1, device=x.device, dtype=x.dtype)
+        # scatter-mean aggregate (use edge_msg dtype to handle mixed precision)
+        agg = torch.zeros(x.shape[0], edge_msg.shape[1], device=x.device, dtype=edge_msg.dtype)
+        count = torch.zeros(x.shape[0], 1, device=x.device, dtype=edge_msg.dtype)
         agg.scatter_add_(0, dst.unsqueeze(1).expand_as(edge_msg), edge_msg)
-        count.scatter_add_(0, dst.unsqueeze(1), torch.ones_like(dst, dtype=x.dtype).unsqueeze(1))
+        count.scatter_add_(0, dst.unsqueeze(1), torch.ones(dst.shape[0], 1, device=x.device, dtype=edge_msg.dtype))
         count = count.clamp(min=1.0)
         agg = agg / count
 
         # node update with residual
-        node_inp = torch.cat([x, agg], dim=-1)
-        x_out = x + self.node_mlp(node_inp)
+        node_inp = torch.cat([x.to(agg.dtype), agg], dim=-1)
+        x_out = x.to(agg.dtype) + self.node_mlp(node_inp)
         x_out = self.node_norm(x_out)
         _check_finite(x_out, "GNNBlock.node_update")
 
@@ -143,7 +143,7 @@ class CAMSGraphReducer(nn.Module):
     def __init__(
         self,
         healpix_level: int,
-        n_channels: int,
+        in_features: int,
         token_size: int,
         latent_dim: int,
         hidden_dim: int = 128,
@@ -152,14 +152,13 @@ class CAMSGraphReducer(nn.Module):
     ) -> None:
         super().__init__()
         self.healpix_level = healpix_level
-        self.n_channels = n_channels
+        self.in_features = in_features
         self.token_size = token_size
         self.latent_dim = latent_dim
         self.hidden_dim = hidden_dim
         self.n_layers = n_layers
         self.k_neighbors = k_neighbors
 
-        in_features = token_size * n_channels
         self.input_proj = nn.Linear(in_features, hidden_dim)
         self.pos_enc = nn.Linear(3, hidden_dim, bias=False)
 
