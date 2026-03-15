@@ -57,6 +57,25 @@ def _compute_rmse(pred: xr.DataArray, target: xr.DataArray, dim: str = "ipoint")
     return np.sqrt(((pred - target) ** 2).mean(dim=dim))
 
 
+def _scorecard_channel_order(channel: str) -> tuple[int, str, float | str]:
+    """Return a stable sort key for scorecard heatmap channels.
+
+    Pressure-level channels such as ``co_50`` and ``co_1000`` are ordered by
+    ascending level so they render top-to-bottom as 50, ..., 1000. Total-column
+    channels such as ``tc_co`` are placed after the pressure levels.
+    """
+    ch = channel.lower()
+
+    if ch.startswith("tc_"):
+        return (2, ch[3:], float("inf"))
+
+    species, sep, suffix = ch.rpartition("_")
+    if sep and suffix.isdigit():
+        return (0, species, float(suffix))
+
+    return (1, ch, ch)
+
+
 
 def _cams_steps_as_hours(cams_reader: CAMSForecastReader) -> set[int]:
     """Return CAMS forecast steps converted to integer hours.
@@ -167,27 +186,37 @@ def _plot_bias_maps(
     wg_map: dict[int, int],
     run_id: str,
     convert_to_ppm: bool = False,
+    color_max_ppb: float | None = None,
 ) -> None:
     """Produce and save global bias scatter maps for each forecast step/channel.
 
+    The colour scale is held **constant** across all forecast steps for a
+    given channel so that animations are meaningful.  An optional
+    ``color_max_ppb`` cap (in ppb) limits the symmetric range.
+
     Maps are written under ``plotter.out_plot_basedir/<stream>/maps/{wg_bias,cams_bias}``.
     """
-    # make sure output directories exist before looping; the Plotter
-    # does not create them automatically and missing dirs were causing
-    # errors during evaluation (see bug report).
+    import cartopy.crs as ccrs
+
+    # make sure output directories exist before looping
     for tag in ("wg_bias", "cams_bias"):
         outdir = plotter.get_map_output_dir(tag)
         if not outdir.exists():
             _logger.info(f"Creating directory {outdir}")
             outdir.mkdir(parents=True, exist_ok=True)
 
+    combo_dir = plotter.out_plot_basedir / stream / "maps" / "bias_compare"
+    combo_dir.mkdir(parents=True, exist_ok=True)
+
+    # ---- first pass: compute per-channel global bias range ---------------
+    channel_maxabs: dict[str, float] = {ch: 0.0 for ch in channels}
+    # cache converted bias DataArrays to avoid reloading in the second pass
+    bias_cache: dict[tuple[str, int], tuple[xr.DataArray, xr.DataArray]] = {}
+
     for hr in forecast_hours:
         raw = wg_map[hr]
         wg_data = wg_reader.get_data(stream=stream, fsteps=[raw], channels=channels)
         if raw not in wg_data.target:
-            _logger.warning(
-                f"Forecast step {hr}h (raw {raw}) not found in WG output – skipping."
-            )
             continue
         wg_target = wg_data.target[raw]
         wg_pred = wg_data.prediction[raw]
@@ -195,52 +224,60 @@ def _plot_bias_maps(
         for ch in channels:
             tar = wg_target.sel(channel=ch)
             pred = wg_pred.sel(channel=ch)
-            # extract coordinates once
             lat = tar["lat"].values
             lon = tar["lon"].values
-            wg_bias = pred - tar
 
-            _logger.info(f"Processing forecast step {hr}h, channel {ch}")
-            # Ensure wg_bias is calculated before logging
-            wg_bias = pred - tar
-
-            # Ensure cams_vals is calculated before logging
             cams_vals = cams_reader.get_data(ch, step=hr, target_lat=lat, target_lon=lon)
             cams_vals = np.asarray(cams_vals).ravel()
-
-            # Log detailed shapes for debugging
-            _logger.info(f"wg_bias shape: {wg_bias.shape}")
-            _logger.info(f"cams_vals shape: {cams_vals.shape}")
             wg_bias_da, cams_bias_da = _prepare_bias_da(pred, tar, cams_vals)
 
-            # optionally convert kg/kg bias to ppmv
             ppm_factor = _channel_ppm_factor(ch) if convert_to_ppm else None
             if ppm_factor is not None:
                 wg_bias_da = wg_bias_da * ppm_factor
                 cams_bias_da = cams_bias_da * ppm_factor
-                _logger.info(f"Applied ppm conversion factor {ppm_factor:.4g} to {ch} bias")
 
-            plotter.update_data_selection(
-                {"sample": 0, "stream": stream, "forecast_step": hr}
-            )
-            # compute symmetric color bounds so zero is centered on the bar
+            bias_cache[(ch, hr)] = (wg_bias_da, cams_bias_da)
+
             all_vals = np.concatenate([
                 np.asarray(wg_bias_da).ravel(),
                 np.asarray(cams_bias_da).ravel(),
             ])
             if all_vals.size > 0:
                 maxabs = float(np.nanmax(np.abs(all_vals)))
+                channel_maxabs[ch] = max(channel_maxabs[ch], maxabs)
+
+    # apply colour cap from color_max_ppb (value is in ppb; display may be ppm)
+    for ch in channels:
+        if color_max_ppb is not None:
+            ppm_factor = _channel_ppm_factor(ch) if convert_to_ppm else None
+            if ppm_factor is not None:
+                cap = color_max_ppb / 1000.0  # ppb -> ppm
             else:
-                maxabs = 0.0
-            map_opts = {"vmin": -maxabs, "vmax": maxabs, "colormap": "coolwarm"}
+                # convert ppb back to kg/kg for this species
+                inv = _channel_ppm_factor(ch)
+                cap = (color_max_ppb / 1000.0 / inv) if inv else color_max_ppb
+            if channel_maxabs[ch] > cap:
+                _logger.warning(
+                    f"Bias channel {ch}: max |bias| {channel_maxabs[ch]:.4g} "
+                    f"exceeds color cap ({color_max_ppb} ppb = {cap:.4g}); clipping."
+                )
+            channel_maxabs[ch] = min(channel_maxabs[ch], cap)
+        _logger.info(
+            f"Bias colour range for {ch}: +/- {channel_maxabs[ch]:.4g}"
+        )
 
-            # produce a combined figure with two side-by-side maps sharing
-            # the same symmetric colourbar centred on zero
-            import cartopy.crs as ccrs
+    # ---- second pass: plot with fixed colour range -----------------------
+    for hr in forecast_hours:
+        for ch in channels:
+            key = (ch, hr)
+            if key not in bias_cache:
+                continue
+            wg_bias_da, cams_bias_da = bias_cache[key]
+            maxabs = channel_maxabs[ch]
 
-            # directory for combined bias plots
-            combo_dir = plotter.out_plot_basedir / stream / "maps" / "bias_compare"
-            combo_dir.mkdir(parents=True, exist_ok=True)
+            plotter.update_data_selection(
+                {"sample": 0, "stream": stream, "forecast_step": hr}
+            )
 
             fig = plt.figure(figsize=(16, 8), dpi=300)
             axs = [
@@ -248,8 +285,8 @@ def _plot_bias_maps(
                 fig.add_subplot(1, 2, 2, projection=ccrs.Robinson()),
             ]
             titles = [
-                "CAMS Forecast – Analysis",
-                "WG Prediction – Target",
+                "CAMS Forecast \u2013 Analysis",
+                "WG Prediction \u2013 Target",
             ]
             das = [cams_bias_da, wg_bias_da]
 
@@ -259,30 +296,26 @@ def _plot_bias_maps(
                     da["lon"],
                     da["lat"],
                     c=da.values,
-                    cmap=map_opts.get("colormap", "coolwarm"),
-                    vmin=map_opts.get("vmin"),
-                    vmax=map_opts.get("vmax"),
+                    cmap="coolwarm",
+                    vmin=-maxabs,
+                    vmax=maxabs,
                     transform=ccrs.PlateCarree(),
                     s=1,
                     linewidths=0.0,
                 )
                 ax.set_global()
-                ax.set_title(f"{title} – {ch} (fstep {hr})")
+                ax.set_title(f"{title} \u2013 {ch} (fstep {hr})")
 
-            # shared colorbar beneath both axes
-            mappable = scatter_plt
             cbar = fig.colorbar(
-                mappable,
+                scatter_plt,
                 ax=axs,
                 orientation="horizontal",
-                pad=0.02,                # smaller pad to keep colorbar close to axes
-                fraction=0.04,           # make bar thinner
+                pad=0.02,
+                fraction=0.04,
             )
             bias_unit = "ppm" if (convert_to_ppm and _channel_ppm_factor(ch) is not None) else "kg kg\u207b\u00b9"
             cbar.set_label(f"Bias ({bias_unit})")
 
-            # explicitly adjust margins so the colorbar isn't clipped; we want
-            # some space at bottom for ticks and label
             fig.subplots_adjust(left=0.05, right=0.95, top=0.90, bottom=0.15)
 
             fname = combo_dir / f"bias_{ch}_fstep_{hr:03d}.png"
@@ -301,12 +334,15 @@ def _plot_value_maps(
     wg_map: dict[int, int],
     run_id: str,
     convert_to_ppm: bool = False,
+    color_max_ppb: float | None = None,
 ) -> "Path":
     """Produce and save side-by-side global maps of CAMS forecast vs WG prediction.
 
     Each frame is a Robinson-projection scatter plot with two panels:
-    *CAMS Forecast* (left) and *WG Prediction* (right), sharing a common
-    colour scale derived from the combined range of both datasets.
+    *CAMS Forecast* (left) and *WG Prediction* (right), sharing a **constant**
+    colour scale across all forecast steps for a given channel.  The range
+    is derived from the global min/max across all steps and can optionally
+    be capped via ``color_max_ppb`` (in ppb).
 
     Frames are written under
     ``plotter.out_plot_basedir/<stream>/maps/value_compare/``
@@ -323,12 +359,17 @@ def _plot_value_maps(
     value_dir.mkdir(parents=True, exist_ok=True)
     _logger.info(f"Saving value comparison maps to {value_dir}")
 
+    # ---- first pass: collect data and compute per-channel global ranges --
+    # keyed by (channel, hour) -> (lat, lon, cams_vals, pred_vals)
+    frame_data: dict[tuple[str, int], tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
+    channel_ranges: dict[str, tuple[float, float]] = {}  # ch -> (vmin, vmax)
+
     for hr in forecast_hours:
         raw = wg_map[hr]
         wg_data = wg_reader.get_data(stream=stream, fsteps=[raw], channels=channels)
         if raw not in wg_data.target:
             _logger.warning(
-                f"Forecast step {hr}h (raw {raw}) not found in WG output – skipping."
+                f"Forecast step {hr}h (raw {raw}) not found in WG output \u2013 skipping."
             )
             continue
         wg_target = wg_data.target[raw]
@@ -351,15 +392,62 @@ def _plot_value_maps(
             if ppm_factor is not None:
                 cams_vals = cams_vals * ppm_factor
                 pred_vals = pred_vals * ppm_factor
-                _logger.info(f"Applied ppm conversion factor {ppm_factor:.4g} to {ch} values")
 
-            # shared colour range so both panels are directly comparable
+            frame_data[(ch, hr)] = (lat, lon, cams_vals, pred_vals)
+
             all_vals = np.concatenate([cams_vals, pred_vals])
-            vmin = float(np.nanmin(all_vals))
-            vmax = float(np.nanmax(all_vals))
+            cur_min = float(np.nanmin(all_vals))
+            cur_max = float(np.nanmax(all_vals))
+            if ch not in channel_ranges:
+                channel_ranges[ch] = (cur_min, cur_max)
+            else:
+                prev_min, prev_max = channel_ranges[ch]
+                channel_ranges[ch] = (min(prev_min, cur_min), max(prev_max, cur_max))
+
+    # apply color_max_ppb cap and warn about extreme values
+    for ch in list(channel_ranges):
+        vmin, vmax = channel_ranges[ch]
+        ppm_factor = _channel_ppm_factor(ch) if convert_to_ppm else None
+        # warn about suspiciously large values (> 1 ppm)
+        if ppm_factor is not None and vmax > 1.0:
+            _logger.warning(
+                f"Channel {ch}: max value {vmax:.4g} ppm (> 1 ppm) \u2013 "
+                f"this may indicate a data or conversion issue."
+            )
+
+        if color_max_ppb is not None:
+            if ppm_factor is not None:
+                cap = color_max_ppb / 1000.0  # ppb -> ppm
+            else:
+                inv = _channel_ppm_factor(ch)
+                cap = (color_max_ppb / 1000.0 / inv) if inv else color_max_ppb
+            if vmax > cap:
+                _logger.warning(
+                    f"Channel {ch}: max value {vmax:.4g} exceeds color cap "
+                    f"({color_max_ppb} ppb = {cap:.4g}); clipping colour scale."
+                )
+            vmax = min(vmax, cap)
+        vmin = max(vmin, 0)  # mixing ratios are non-negative
+        channel_ranges[ch] = (vmin, vmax)
+        _logger.info(
+            f"Value colour range for {ch}: [{vmin:.4g}, {vmax:.4g}]"
+        )
+
+    # ---- second pass: plot with fixed per-channel colour range -----------
+    for ch in channels:
+        if ch not in channel_ranges:
+            continue
+        vmin, vmax = channel_ranges[ch]
+        value_unit = "ppm" if (convert_to_ppm and _channel_ppm_factor(ch) is not None) else "kg kg\u207b\u00b9"
+
+        for hr in forecast_hours:
+            key = (ch, hr)
+            if key not in frame_data:
+                continue
+            lat, lon, cams_vals, pred_vals = frame_data[key]
 
             _logger.info(
-                f"Value map – fstep {hr}h, channel {ch}: "
+                f"Value map \u2013 fstep {hr}h, channel {ch}: "
                 f"vmin={vmin:.4g}, vmax={vmax:.4g}"
             )
 
@@ -389,7 +477,7 @@ def _plot_value_maps(
                     linewidths=0.0,
                 )
                 ax.set_global()
-                ax.set_title(f"{title} – {ch} (fstep {hr}h)")
+                ax.set_title(f"{title} \u2013 {ch} (fstep {hr}h)")
 
             cbar = fig.colorbar(
                 last_sc,
@@ -398,7 +486,6 @@ def _plot_value_maps(
                 pad=0.02,
                 fraction=0.04,
             )
-            value_unit = "ppm" if (convert_to_ppm and _channel_ppm_factor(ch) is not None) else "kg kg\u207b\u00b9"
             cbar.set_label(f"{ch} ({value_unit})")
 
             fig.subplots_adjust(left=0.05, right=0.95, top=0.90, bottom=0.15)
@@ -563,7 +650,7 @@ def _rmse_scorecard(
         df_heat["rel_pct"] = (
             (df_heat["wg_rmse"] - df_heat["cams_rmse"]) / df_heat["cams_rmse"] * 100
         )
-        channels = sorted(df_heat["channel"].unique())
+        channels = sorted(df_heat["channel"].unique(), key=_scorecard_channel_order)
         steps = sorted(df_heat["forecast_step"].unique())
         nchan = len(channels)
         # leave some vertical space between rows so the maps aren't squeezed;
@@ -667,10 +754,9 @@ def plot_cams_wg_comparison(
     plot_rmse_flag = cams_cfg.get("plot_rmse_curves", False)
     write_scorecard_flag = cams_cfg.get("write_scorecard", False)
     convert_to_ppm = bool(cams_cfg.get("convert_to_ppm", False))
-    # hook for further settings if needed
-    # bias_map_opts = cams_cfg.get("bias_map_opts", {})
-    # rmse_plot_opts = cams_cfg.get("rmse_plot_opts", {})
-    # scorecard_opts = cams_cfg.get("scorecard_opts", {})
+    # colour scale cap in ppb – keeps animations readable and flags bad values
+    _raw_cap = cams_cfg.get("color_max_ppb", None)
+    color_max_ppb: float | None = float(_raw_cap) if _raw_cap is not None else None
 
     # --- readers ---------------------------------------------------------
     wg_reader = WeatherGenZarrReader(eval_cfg, run_id)
@@ -796,6 +882,7 @@ def plot_cams_wg_comparison(
             wg_map,
             run_id,
             convert_to_ppm=convert_to_ppm,
+            color_max_ppb=color_max_ppb,
         )
         if create_video_flag:
             _logger.info("Building bias map animations")
@@ -820,6 +907,7 @@ def plot_cams_wg_comparison(
             wg_map,
             run_id,
             convert_to_ppm=convert_to_ppm,
+            color_max_ppb=color_max_ppb,
         )
         if create_video_flag:
             _logger.info("Building value map animations")
