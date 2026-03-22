@@ -11,8 +11,8 @@ CAMSANALYSIS :
   type : cams
   filenames : ['cams_analysis_2017_2022_extended.zarr']
   stream_id : 2
-  source : [ 'pm2p5', 'pm10', 'go3_925', 'go3_500', 'no_925', 'no_500', 'no2_925', 'no2_500', 'co_925', 'co_500' ]
-  target : [ 'pm2p5', 'pm10', 'go3_925', 'go3_500', 'no_925', 'no_500', 'no2_925', 'no2_500', 'co_925', 'co_500' ]
+  source : [ 'pm2p5', 'pm10', 'go3_925', 'go3_500', 'no2_925', 'no2_500', 'co_925', 'co_500' ]
+  target : [ 'pm2p5', 'pm10', 'go3_925', 'go3_500', 'no2_925', 'no2_500', 'co_925', 'co_500' ]
   source_exclude : []
   target_exclude : []
   variables: [
