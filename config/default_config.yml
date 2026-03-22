@@ -11,7 +11,9 @@ embed_orientation: "channels"
 embed_unembed_mode: "block"
 embed_dropout_rate: 0.1
 
-ae_local_dim_embed: 2048
+target_cell_local_prediction: True
+
+ae_local_dim_embed: 1024
 ae_local_num_blocks: 0
 ae_local_num_heads: 16
 ae_local_dropout_rate: 0.1
@@ -55,17 +57,20 @@ num_register_tokens: 0
 
 # number of steps offset applied to first target window; if set to zero and forecast_steps=0 then
 # one is training an auto-encoder
-fe_num_blocks: 16
+forecast_offset : 1
+forecast_delta_hrs: 0
+forecast_steps: 4
+forecast_policy: "fixed"
+forecast_freeze_model: False
+forecast_att_dense_rate: 1.0
+fe_num_blocks: 8
 fe_num_heads: 16
 fe_dropout_rate: 0.1
 fe_with_qk_lnorm: True
-fe_layer_norm_after_blocks: [7]  # Index starts at 0. Thus, [3] adds a LayerNorm after the fourth layer
-fe_impute_latent_noise_std: 1e-4
-# currently fixed to 1.0 (due to limitations with flex_attention and triton)
-forecast_att_dense_rate: 1.0
-with_step_conditioning: False
+fe_layer_norm_after_blocks: []  # Index starts at 0. Thus, [3] adds a LayerNorm after the fourth layer
+impute_latent_noise_std: 0.0  # 1e-4
 
-healpix_level: 5
+healpix_level: 4
 
 # Use 2D RoPE instead of traditional global positional encoding
 # When True: uses 2D RoPE based on healpix cell coordinates (lat/lon)
@@ -91,9 +96,60 @@ latent_noise_deterministic_latents: True
 freeze_modules: ""
 load_chkpt: {}
 
+# whether to track the exponential moving average of weights for validation
+validate_with_ema: True
+ema_ramp_up_ratio: 0.09
+ema_halflife_in_thousands: 1e-3
+
+# training mode: "forecast" or "masking" (masked token modeling)
+# for "masking" to train with auto-encoder mode, forecast_offset should be 0
+training_mode: "forecast"
+# masking rate when training mode is "masking"; ignored in foreacast mode
+masking_rate: 0.6
+# sample the masking rate (with normal distribution centered at masking_rate)
+# note that a sampled masking rate leads to varying requirements
+masking_rate_sampling: True
+# sample a subset of all target points, useful e.g. to reduce memory requirements (also can specify per-stream)
+sampling_rate_target: 1.0
+# include a masking strategy here, currently only supporting "random", "block", "healpix", "channel", "combination"
+masking_strategy: "random"
+# masking_strategy_config is a dictionary of additional parameters for the masking strategy
+# required for "healpix" and "channel" masking strategies
+# "healpix": requires healpix mask level to be specified with `hl_mask`
+# "channel": requires "mode" to be specified, "per_cell" or "global",
+masking_strategy_config: {"strategies": ["random", "healpix", "channel"], 
+                          "probabilities": [0.34, 0.33, 0.33],
+                          "hl_mask": 3, "mode": "per_cell",
+                          "same_strategy_per_batch": false
+                          }
+
+num_epochs: 64
+samples_per_epoch: 4096
+samples_per_validation: 512
+shuffle: True
+
+lr_scaling_policy: "sqrt"
+lr_start: 1e-6
+lr_max: 0.0001
+lr_final_decay: 2e-6
+lr_final: 0.0
+lr_steps_warmup: 256
+lr_steps_cooldown: 512
+lr_policy_warmup: "cosine"
+lr_policy_decay: "constant"
+lr_policy_cooldown: "linear"
+
+grad_clip: 1.0
+weight_decay: 0.1
 norm_type: "LayerNorm"
 
-#####################################
+# start_date: 197901010000
+# end_date: 202012310000
+# start_date_val: 202210010000
+# end_date_val: 202212310000
+# len_hrs: 6
+# step_hrs: 6
+# input_window_steps: 1
 
 streams_directory: "./config/streams/era5_1deg/"
 streams: ???

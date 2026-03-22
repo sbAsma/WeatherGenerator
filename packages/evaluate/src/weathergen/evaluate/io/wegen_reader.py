@@ -388,6 +388,15 @@ class WeatherGenZarrReader(WeatherGenReader):
                 stream_cfg,
             )
 
+            # Pre-filter channels early (before expensive _force_consistent_grids
+            # shuffle) to reduce memory.  Only safe when no derived channels are
+            # configured, because derived channels may need source channels that
+            # are not in the requested set.
+            _has_derived = "derive_channels" in stream_cfg and stream_cfg["derive_channels"]
+            _early_channel_filter = (
+                channels if (not _has_derived and set(channels) != set(all_channels)) else None
+            )
+
             da_tars, da_preds = [], []
 
             if return_counts:
@@ -435,8 +444,17 @@ class WeatherGenZarrReader(WeatherGenReader):
                         _logger.debug(f"Selecting ensemble members {ensemble}.")
                         pred = pred.sel(ens=ensemble)
 
-                    da_tars_fs.append(target.squeeze())
-                    da_preds_fs.append(pred.squeeze())
+                    target_sq = target.squeeze()
+                    pred_sq = pred.squeeze()
+
+                    # Early channel selection – drastically reduces memory when
+                    # only a few channels are requested out of many stored.
+                    if _early_channel_filter is not None:
+                        target_sq = target_sq.sel(channel=_early_channel_filter)
+                        pred_sq = pred_sq.sel(channel=_early_channel_filter)
+
+                    da_tars_fs.append(target_sq)
+                    da_preds_fs.append(pred_sq)
 
                 if not da_tars_fs:
                     _logger.info(

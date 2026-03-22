@@ -25,7 +25,7 @@ ae_adapter_with_qk_lnorm: True
 ae_adapter_with_residual: True
 ae_adapter_dropout_rate: 0.1
 
-ae_global_dim_embed: 1024 # 2048
+ae_global_dim_embed: 2048
 ae_global_num_blocks: 4
 ae_global_num_heads: 32
 ae_global_dropout_rate: 0.1
@@ -83,14 +83,14 @@ latent_noise_saturate_encodings: 5
 latent_noise_use_additive_noise: False
 latent_noise_deterministic_latents: True 
 
-freeze_modules: ".*global.*|.*local.*|.*adapter.*|.*q_cells.*|.*latent.*|.*ERA5.*|.*CAMSEAC4.*"
+freeze_modules: ".*global.*|.*local.*|.*adapter.*|.*q_cells.*|.*latent.*|.*ERA5.*|.*CAMSEAC4.*|.*CAMSANALYSIS.*"
 load_chkpt: {}
 
 norm_type: "LayerNorm"
 
 #####################################
 
-streams_directory: "./config/streams/era5_1deg_forecasting/"
+streams_directory: "./config/streams/cams_eac4_era5_forecasting/"
 streams: ???
 
 # type of zarr_store
@@ -120,7 +120,7 @@ general:
 train_log_freq:
   terminal: 10
   metrics: 20
-  checkpoint: 250
+  checkpoint: 120
 
 # parameters for data loading
 data_loading :
@@ -140,11 +140,11 @@ training_config:
   samples_per_mini_epoch: 4096
   shuffle: True
 
-  start_date: 1979-01-01T00:00
-  end_date: 2015-07-24T00:00
+  start_date: 2017-01-01T00:00
+  end_date: 2022-05-31T12:00
 
-  time_window_step: 6:00:00
-  time_window_len: 6:00:00
+  time_window_step: 12:00:00
+  time_window_len: 12:00:00
   
   learning_rate_scheduling :
     lr_start: 1e-6
@@ -183,7 +183,7 @@ training_config:
     }
 
   forecast :
-      time_step: 06:00:00
+      time_step: 12:00:00
       offset: 1
       num_steps: 8
       policy: "fixed"
@@ -195,8 +195,8 @@ validation_config:
   samples_per_mini_epoch: 256
   shuffle: False
 
-  start_date: 2015-07-25T00:00
-  end_date: 2016-07-25T00:00
+  start_date: 2021-06-01T12:00
+  end_date: 2022-05-31T12:00
   
   # whether to track the exponential moving average of weights for validation
   validate_with_ema: 
@@ -248,3 +248,16 @@ wgtags:
   # All extra tags (including lists, dictionaries, etc.) are treated 
   # as strings by mlflow, so treat all extra tags as simple string key: value pairs.
   grid: null
+
+
+###############################################################
+### GNN-based channel reducer for CAMS streams
+#################################################################
+
+gnn_reducer:
+  enable: true
+  target_streams: ["CAMSANALYSIS"]
+  latent_dim: 32     
+  hidden_dim: 128
+  n_layers: 3
+  k_neighbors: 8

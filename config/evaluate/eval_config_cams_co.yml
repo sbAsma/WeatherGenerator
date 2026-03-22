@@ -1,0 +1,152 @@
+#optional: if commented out all is taken care of by the default settings
+# NB. global options apply to all run_ids 
+#global_plotting_options:
+#  image_format : "png" #options: "png", "pdf", "svg", "eps", "jpg" ..
+#  dpi_val : 300
+#  ERA5:
+#    marker_size: 2
+#    scale_marker_size: 1
+#    marker: "o"
+#    # alpha: 0.5
+#    2t: 
+#      vmin: 250
+#      vmax: 300
+#    10u:
+#      vmin: -40
+#      vmax: 40
+
+# config/evaluate/my_compare.yml
+verbose: true
+image_format: "png"
+dpi_val: 300
+summary_plots: true
+
+evaluation:
+  metrics  : []
+  regions: ["global"]
+  summary_plots : False # true
+  summary_dir: "./plots/"
+  plot_ensemble: false #supported: false, "std", "minmax", "members"
+  plot_score_maps: false #plot scores on a 2D maps. it slows down score computation 
+  print_summary: false #print out score values on screen. it can be verbose
+  log_scale: false
+  add_grid: true
+  score_cards: false
+  # fps: 400
+  # config related to CAMS forecast comparison
+  step_hrs: 6  # hours per WG forecast step index; used to convert WG step indices to hours
+  plot_cams_forecast_comparison: True
+    # New flag to enable CAMS comparison plots
+  cams_base_dir: "/work/bk1450/b383429/CAMS/"  # Path to CAMS data
+  cams_forecast_filename: "cams_forecast_co_data_2016.zarr"  # CAMS forecast Zarr store inside cams_base_dir
+  cams_forecast_steps: "all" # Forecast steps to compare with CAMS
+  regrid_forecast: True
+  plot_bias_maps: False
+  plot_value_maps: False # True   # side-by-side global maps of CAMS forecast vs WG prediction
+  create_video: False # True      # assemble per-step frames into per-channel GIF animations
+  fps: 2.0                # frames per second for animations
+  plot_rmse_curves: False # True
+  write_scorecard:  True
+  convert_to_ppm: True     # convert kg/kg profile values (co, no, no2, so2, o3) to ppmv before plotting
+  color_max_ppb: 200       # cap the colour scale at this value (in ppb) for value & bias maps; keeps animations readable
+
+run_ids :
+  hywzotm2: # 20fsteps 8 fsteps model
+    label: "Layernorm + noise"
+    results_base_dir : "./results/hywzotm2/"
+    epoch: 0
+    rank: 0
+    streams:
+      CAMSEAC4:
+        channels: [
+          # Carbon monoxide (co)
+          # 'co_1000', 'co_925', 'co_500',  'co_150',
+          'co_1000', 'co_925', 'co_850', 'co_700', 'co_600', 'co_500',
+          'co_400', 'co_300', 'co_250', 'co_200', 'co_150', 'co_100', 'co_50',
+          'tc_co'
+          ]   # same names as WG
+        evaluation:
+          forecast_step: "all"
+          sample: "all"
+        plotting:
+          sample: "all"
+          forecast_step: "all"
+          plot_maps: false
+          plot_target: false
+          plot_histograms: false
+          plot_animations: false
+  # f47wb6n9: # 20 fsteps # k7jo3d5p:  # 120 fsteps
+  #   label: "Baseline"
+  #   results_base_dir : "./results/f47wb6n9/"
+  #   # models_base_dir : "./models/f47wb6n9/"
+  #   epoch: 0
+  #   rank: 0
+  #   streams:
+  #     CAMSEAC4:
+  #       channels: [
+  #           # Surface variables
+  #           'pm1', 'tc_o3', 
+            
+  #           # Ozone (o3)
+  #           'go3_1000', 
+  #       ]
+  #       evaluation:
+  #         forecast_step: "all"
+  #         sample: "all"
+  #       plotting:
+  #         sample: "all"
+  #         forecast_step: "all"
+  #         plot_maps: true
+  #         plot_target: true
+  #         plot_histograms: true
+  #         plot_animations: true
+  #     ERA5:
+  #       channels: ["2t", "q_850"] 
+  #       evaluation:
+  #         forecast_step: "all"
+  #         sample: "all"
+  #       plotting:
+  #         sample: "all"
+  #         forecast_step: "all"
+  #         plot_maps: true
+  #         plot_target: true
+  #         plot_histograms: true
+  #         plot_animations: true
+# run_ids :
+#   # kxkd41za: # 5 samples started at date 202101010000
+#   # rgcmpsqn: # 1 sample started at date 202101010000
+#   # nb5s3jwp: #previous inference
+#   # ciardeuf: # new rebase - 1 sample started at date 202101010000
+#   # i3jw2xev: # new rebase - 3  samples started at date 202101010000
+#   # j8fr654n: # new rebase - ERA5 + CAMS - clipped log (aurora) - 1 sample started at date 202101010000
+#   sfs9vq71:  
+#     label: "fine-tuned model"
+#     results_base_dir : "./results/"
+#     epoch: 0
+#     rank: 0
+#     streams:
+#       CAMSEAC4:
+#         channels: ["tc_o3"] 
+#         evaluation:
+#           forecast_step: "all"
+#           sample: "all"
+#         plotting:
+#           sample: "all"
+#           forecast_step: "all"
+#           plot_maps: true
+#           plot_target: true
+#           plot_histograms: true
+#           plot_animations: true
+#       ERA5:
+#         channels: ["t_850"] #, "10v", "z_500", "t_850", "u_850", "v_850", "q_850", ]
+#         evaluation:
+#           forecast_step: "all"
+#           sample: "all"
+#           ensemble: "all" #supported: "all", "mean", [0,1,2]
+#         plotting:
+#           sample: "all"
+#           forecast_step: "all"
+#           plot_maps: true
+#           plot_target: true
+#           plot_histograms: true
+#           plot_animations: true

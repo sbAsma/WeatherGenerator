@@ -7,13 +7,15 @@
 # granted to it by virtue of its status as an intergovernmental organisation
 # nor does it submit to any jurisdiction.
 
-CAMSEAC4 :
+CAMSANALYSIS :
   type : cams
-  filenames : ['cams_eac4_2003_2024.zarr']
+  filenames : ['cams_analysis_2017_2022.zarr']
   source : []
   target : []
   source_exclude : [
       # Surface variables
+      # 'pm1', 'pm2p5', 'pm10',
+      # 'tc_co', 'tc_no', 'tc_no2', 'tc_o3', 
       'tc_so2',
 
       # Sulfur dioxide (so2)
@@ -22,6 +24,8 @@ CAMSEAC4 :
   ]
   target_exclude : [
       # Surface variables
+      # 'pm1', 'pm2p5', 'pm10',
+      # 'tc_co', 'tc_no', 'tc_no2', 'tc_o3', 
       'tc_so2',
       
       # Sulfur dioxide (so2)
@@ -69,6 +73,7 @@ CAMSEAC4 :
     net : linear
     dim_embed : 512
   target_readout :
+    type : 'obs_value'  # token or obs_value
     num_layers : 2
     num_heads : 4
     # sampling_rate : 0.2

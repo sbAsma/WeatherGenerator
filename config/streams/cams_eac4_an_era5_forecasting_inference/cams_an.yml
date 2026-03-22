@@ -7,27 +7,24 @@
 # granted to it by virtue of its status as an intergovernmental organisation
 # nor does it submit to any jurisdiction.
 
-CAMSEAC4 :
+CAMSANALYSIS :
   type : cams
-  filenames : ['cams_eac4_2003_2024.zarr']
+  filenames : ['cams_analysis_2017_2022_extended.zarr']
+  stream_id : 2
   source : []
   target : []
   source_exclude : [
-      # Surface variables
       'tc_so2',
-
       # Sulfur dioxide (so2)
       'so2_1000', 'so2_925', 'so2_850', 'so2_700', 'so2_600', 'so2_500',
       'so2_400', 'so2_300', 'so2_250', 'so2_200', 'so2_150', 'so2_100', 'so2_50',
-  ]
+   ]
   target_exclude : [
-      # Surface variables
       'tc_so2',
-      
       # Sulfur dioxide (so2)
       'so2_1000', 'so2_925', 'so2_850', 'so2_700', 'so2_600', 'so2_500',
       'so2_400', 'so2_300', 'so2_250', 'so2_200', 'so2_150', 'so2_100', 'so2_50',
-  ]
+   ]
   variables: [
       # Surface variables
       'pm1', 'pm2p5', 'pm10',
@@ -63,11 +60,11 @@ CAMSEAC4 :
     net : transformer
     num_tokens : 1
     num_heads : 8
-    dim_embed : 512
+    dim_embed : 256
     num_blocks : 2
   embed_target_coords :
     net : linear
-    dim_embed : 512
+    dim_embed : 256
   target_readout :
     num_layers : 2
     num_heads : 4
