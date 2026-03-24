@@ -822,12 +822,16 @@ class CAMSForecastReader:
         self.eval_cfg = eval_cfg
         logging.info(f"Initializing CAMSForecastReader with config: {eval_cfg}")
         self.cams_base_dir = Path(self.eval_cfg.get("cams_base_dir"))
-        filename = self.cams_base_dir / "cams_forecast_co_data_2016.zarr"
-        ds_surface = xr.open_zarr(filename, group="surface", chunks={"time": 24})
-        ds_profiles = xr.open_zarr(filename, group="profiles", chunks={"time": 24})
+        self.cams_forecast_filename = self.eval_cfg.get(
+            "cams_forecast_filename", "cams_forecast_2022.zarr"
+        )
+        self.cams_forecast_path = self.cams_base_dir / self.cams_forecast_filename
+        ds_surface = xr.open_zarr(self.cams_forecast_path, group="surface", chunks="auto")
+        ds_profiles = xr.open_zarr(self.cams_forecast_path, group="profiles", chunks="auto")
 
         # merge along variables
         self.ds = xr.merge([ds_surface, ds_profiles])
+        self.available_channels = set(self.ds.data_vars)
         self.channels = {
             'surface': ["pm1", "pm2p5", "pm10"],
             'tc': ["tc_co", "tc_no", "tc_no2", "tc_so2", "tc_o3"],
@@ -869,7 +873,23 @@ class CAMSForecastReader:
         # data is expected to have shape (..., n_lat, n_lon)
         return data[..., self._lat_order, :][..., :, self._lon_order]
 
-    def get_data(self, ch_: str, step: int | None = None, target_lat: np.ndarray | None = None, target_lon: np.ndarray | None = None) -> np.ndarray:
+    def supports_channel(self, ch_: str) -> bool:
+        """Return True when a channel can be resolved from the loaded CAMS store."""
+        if ch_ in self.available_channels:
+            return True
+
+        ch_parts = ch_.split("_")
+        if len(ch_parts) != 2:
+            return False
+
+        var, level = ch_parts[0], ch_parts[1]
+        return (
+            var in self.channels['profiles']
+            and level in self.pressure_levels
+            and var in self.available_channels
+        )
+
+    def get_data(self, ch_: str, step: int | None = None, target_lat: np.ndarray | None = None, target_lon: np.ndarray | None = None, time: "np.datetime64 | str | None" = None) -> np.ndarray:
         """
         Retrieve the data for a given channel, optionally regridded to a target grid.
 
@@ -889,6 +909,10 @@ class CAMSForecastReader:
             Target latitude values for regridding / interpolation.
         target_lon: np.ndarray | None
             Target longitude values for regridding / interpolation.
+        time : np.datetime64 | str | None
+            Forecast initialisation time to select.  When provided the
+            nearest matching time entry is used instead of falling back to
+            the first entry.
 
         Returns
         -------
@@ -903,17 +927,39 @@ class CAMSForecastReader:
             # fall back to splitting for profile variables such as 'co_500'
             ch_parts = ch_.split("_")
             if len(ch_parts) != 2:
-                raise ValueError(f"Channel {ch_} not found in CAMS dataset.")
+                available = sorted(self.available_channels)
+                raise ValueError(
+                    f"Channel {ch_} not found in CAMS dataset: {self.cams_forecast_path}. "
+                    + f"Available base variables: {available}"
+                )
             var, level = ch_parts[0], ch_parts[1]
-            if var in self.channels['profiles'] and level in self.pressure_levels:
+            if (
+                var in self.channels['profiles']
+                and level in self.pressure_levels
+                and var in self.ds
+            ):
                 da = self.ds[var].sel(isobaricInhPa=level)
             else:
-                raise ValueError(f"Channel {ch_} not found in CAMS dataset.")
+                available = sorted(self.available_channels)
+                raise ValueError(
+                    f"Channel {ch_} not found in CAMS dataset: {self.cams_forecast_path}. "
+                    + f"Available base variables: {available}"
+                )
 
         # Select the requested forecast step before converting to numpy.
         # The CAMS zarr stores `step` as timedelta, so convert hours → Timedelta.
         if step is not None and "step" in da.dims:
             da = da.sel(step=pd.Timedelta(hours=int(step)))
+
+        # Select the correct forecast initialisation time.  When *time* is
+        # provided use nearest-neighbour lookup; otherwise fall back to the
+        # first entry (legacy behaviour used only when regridding).
+        if "time" in da.dims:
+            if time is not None:
+                da = da.sel(time=time, method="nearest")
+            elif (target_lat is not None and target_lon is not None) or self.regrid_data:
+                if da.sizes["time"] > 1:
+                    da = da.isel(time=0)
 
         data = da.values
 
