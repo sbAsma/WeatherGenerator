@@ -120,7 +120,7 @@ general:
 train_log_freq:
   terminal: 10
   metrics: 20
-  checkpoint: 250
+  checkpoint: 120
 
 # parameters for data loading
 data_loading :

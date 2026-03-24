@@ -41,31 +41,30 @@ evaluation:
   cams_analysis_filename: "cams_analysis_2017_2022_extended.zarr"  # CAMS analysis Zarr store used as ground truth for CAMS forecast RMSE
   cams_stream: "CAMSANALYSIS"  # which stream in the CAMS Zarr store contains the forecast variables to compare with
   #############################################################################
-  plot_cams_forecast_comparison: True
+  plot_cams_forecast_comparison: false
   cams_base_dir: "/work/bk1450/b383429/CAMS/"  # Path to CAMS data
   cams_forecast_steps: "all" # Forecast steps to compare with CAMS
   plot_bias_maps: false
-  plot_value_maps:  false   # side-by-side global maps of CAMS forecast vs WG prediction
+  plot_value_maps:  true   # side-by-side global maps of CAMS forecast vs WG prediction
   create_video: false      # assemble per-step frames into per-channel GIF animations
   fps: 2.0                # frames per second for animations
   plot_rmse_curves:  false
-  write_scorecard:  True
+  write_scorecard:  false
   rmse_rel_pct_clip: 100   # clip RMSE relative-to-CAMS heatmap colour range to +/- this percent (set null to disable)
   convert_to_ppm: True     # convert kg/kg profile values (co, no, no2, so2, o3) to ppmv before plotting
   color_max_ppb: 200       # cap the colour scale at this value (in ppb) for value & bias maps; keeps animations readable
   #################################################################################
 
 run_ids :
-  sbj2isah: # 20fsteps 8 fsteps model
+  jquwzsjr: # 20fsteps 8 fsteps model
     label: "Layernorm + noise"
-    results_base_dir : "./results/sbj2isah/"
+    results_base_dir : "./results/jquwzsjr/"
     epoch: 0
     rank: 0
     streams:
       CAMSANALYSIS:
         channels: [
-
-          'pm2p5', 'pm10', 'go3_925', 'go3_500', 'no2_925',
+           'no_925', 'no_500', 'no2_925',
            'no2_500', 'co_925', 'co_500' 
 
           # Surface variables
@@ -93,9 +92,9 @@ run_ids :
           sample: "all"
         plotting:
           sample: "all"
-          forecast_step: "all"
-          plot_maps: false
-          plot_target: false
+          forecast_step: all
+          plot_maps: true
+          plot_target: true
           plot_histograms: false
-          plot_animations: false
+          plot_animations: true
   

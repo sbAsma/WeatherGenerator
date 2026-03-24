@@ -90,7 +90,7 @@ norm_type: "LayerNorm"
 
 #####################################
 
-streams_directory: "./config/streams/cams_eac4_era5_forecasting_inference/"
+streams_directory: "./config/streams/cams_eac4_an_era5_forecasting_inference/"
 streams: ???
 
 # type of zarr_store
@@ -249,15 +249,3 @@ wgtags:
   # as strings by mlflow, so treat all extra tags as simple string key: value pairs.
   grid: null
 
-
-###############################################################
-### GNN-based channel reducer for CAMS streams
-#################################################################
-
-gnn_reducer:
-  enable: true
-  target_streams: ["CAMSANALYSIS"]
-  latent_dim: 32     
-  hidden_dim: 128
-  n_layers: 3
-  k_neighbors: 8
