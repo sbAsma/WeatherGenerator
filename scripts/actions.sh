@@ -154,7 +154,7 @@ case "$1" in
       # 2. Read the yaml and extract the path of the shared conf
       # A new --fix flag is supported by the Python script to remove incorrect
       # symlinks automatically; pass it after the command name below.
-      # This uses the yq command. It is a python package so uvx (bundled with uv) will donwload and create the right venv
+      # The Python helper handles config lookup and symlink validation/creation.
       shift  # consume the "create-links" argument and forward remaining args
       uv run --no-project python scripts/check_symlinks.py "$@"
     )
