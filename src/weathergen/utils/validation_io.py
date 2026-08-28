@@ -60,6 +60,7 @@ def write_output(
     # collect all target / prediction-related information
     fp32 = torch.float32
     preds_all, targets_all, targets_coords_all, targets_times_all = [], [], [], []
+    preds_coords_all, preds_times_all = [], []
 
     # _get_output_length clamps to at least one output step, so this always holds
     assert len(batch.get_output_idxs()) > 0, "Batch carries no output steps."
@@ -71,13 +72,17 @@ def write_output(
 
     n_samples = len(batch.get_source_samples().get_samples())
     targets_lens = []
+    preds_lens = []
 
     for t_idx in timestep_idxs:
         preds_all += [[]]
         targets_all += [[]]
         targets_coords_all += [[]]
         targets_times_all += [[]]
+        preds_coords_all += [[]]
+        preds_times_all += [[]]
         targets_lens += [[]]
+        preds_lens += [[]]
         for sname in cf.streams.keys():
             chunk_idx = model_output.chunk_idx(t_idx)
             assert model_output.forecast_steps[chunk_idx] == t_idx, (
@@ -104,41 +109,69 @@ def write_output(
                 preds = model_output.get_physical_prediction(chunk_idx, sname)
                 targets = target_aux_out.physical[t_idx][sname]["target"]
 
-                preds_s, targets_s, t_coords_s, t_times_s = [], [], [], []
+            is_spoof = target_aux_out.physical[t_idx][sname]["is_spoof"][0]
+            if is_spoof:
+                _logger.debug(
+                    f"Stream '{sname}' at t_idx={t_idx} is spoof "
+                    "(target time window is outside the dataset range); "
+                    "writing model predictions with empty targets."
+                )
 
-                # handle forcing streams or if sample is empty
-                if preds is None:
-                    # preds are empty so create copy of target and add ensemble dimension
-                    assert targets[0].shape[0] == 0, "Empty preds but non-empty targets."
-                    preds = [target.clone().unsqueeze(0) for target in targets]
+            # handle forcing streams or if sample is empty
+            if preds is None:
+                # preds are empty so create copy of target and add ensemble dimension
+                assert targets[0].shape[0] == 0, "Empty preds but non-empty targets."
+                preds = [target.clone().unsqueeze(0) for target in targets]
 
-                for i_batch, (pred, target) in enumerate(zip(preds, targets, strict=True)):
-                    target_data = target_aux_out.physical[t_idx][sname]
-                    t_coords = target_data["target_coords"][i_batch]
-                    t_times = target_data["target_times"][i_batch]
+            for i_batch, (pred, target) in enumerate(zip(preds, targets, strict=True)):
+                target_data = target_aux_out.physical[t_idx][sname]
+                t_coords = target_data["target_coords"][i_batch]
+                t_times = target_data["target_times"][i_batch]
 
-                    idxs_inv = target_aux_out.physical[t_idx][sname]["idxs_inv"][i_batch]
-                    if idxs_inv is not None:
-                        pred = pred[:, idxs_inv]
+                idxs_inv = target_aux_out.physical[t_idx][sname]["idxs_inv"][i_batch]
+                if idxs_inv is not None and (
+                    not isinstance(idxs_inv, torch.Tensor) or idxs_inv.numel() > 0
+                ):
+                    pred = pred[:, idxs_inv]
+                    t_coords = t_coords[idxs_inv]
+                    t_times = t_times[idxs_inv]
+                    if not is_spoof:
                         target = target[idxs_inv]
-                        t_coords = t_coords[idxs_inv]
-                        t_times = t_times[idxs_inv]
 
-                    # denormalize data if requested and map to storage format
-                    preds_s += [dn_data(sname, pred.to(fp32)).detach().cpu().numpy()]
+                # denormalize predictions
+                preds_s += [dn_data(sname, pred.to(fp32)).detach().cpu().numpy()]
+                preds_coords_s += [t_coords.cpu().numpy()]
+                preds_times_s += [t_times.astype("datetime64[ns]")]
+
+                if is_spoof:
+                    # No real observations for this forecast step: write empty target so
+                    # the zarr clearly signals missing ground truth, while predictions
+                    # (computed by the model at the spoof coordinates) are written in full.
+                    n_channels = pred.shape[-1]
+                    targets_s += [np.zeros((0, n_channels), dtype=np.float32)]
+                    t_coords_s += [np.zeros((0, 2), dtype=np.float32)]
+                    t_times_s += [np.array([], dtype="datetime64[ns]")]
+                else:
+                    # In inference_only mode, target tokens are empty (no channel dim); create a
+                    # properly shaped empty array so downstream code handles it gracefully.
+                    n_channels = pred.shape[-1]
+                    if target.ndim == 1 and target.numel() == 0:
+                        target = target.reshape(0, n_channels)
                     targets_s += [dn_data(sname, target.to(fp32)).detach().cpu().numpy()]
-
-                    # extract original target coords and times from target data
                     t_coords_s += [t_coords.cpu().numpy()]
                     t_times_s += [t_times.astype("datetime64[ns]")]
 
             targets_lens[-1] += [[]]
-            targets_lens[-1][-1] += [t.shape[0] for t in targets_s]
+            targets_lens[-1][-1] += [t.shape[0] for t in t_coords_s]
+            preds_lens[-1] += [[]]
+            preds_lens[-1][-1] += [p.shape[0] for p in preds_coords_s]
 
             preds_all[-1] += [np.concatenate(preds_s, axis=1)]
             targets_all[-1] += [np.concatenate(targets_s)]
             targets_coords_all[-1] += [np.concatenate(t_coords_s)]
             targets_times_all[-1] += [np.concatenate(t_times_s)]
+            preds_coords_all[-1] += [np.concatenate(preds_coords_s)]
+            preds_times_all[-1] += [np.concatenate(preds_times_s)]
 
     if len(preds_all) == 0 or np.array([p.shape[1] for pp in preds_all for p in pp]).sum() == 0:
         _logger.warning("Writing no data since predictions are empty.")
@@ -213,6 +246,9 @@ def write_output(
         sample_start=sample_start,
         forecast_offset=forecast_offset,
         forecast_steps=timestep_idxs,
+        preds_coords=preds_coords_all,
+        preds_times=preds_times_all,
+        preds_lens=preds_lens,
     )
 
     store_path = config.get_path_results(cf, mini_epoch)
