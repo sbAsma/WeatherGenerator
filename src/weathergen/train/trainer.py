@@ -23,6 +23,7 @@ from omegaconf import OmegaConf
 from torch.distributed.tensor import DTensor
 
 import weathergen.common.config as config
+import json
 from weathergen.common.config import Config
 from weathergen.datasets.multi_stream_data_sampler import MultiStreamDataSampler
 from weathergen.model.ema import EMAModel
@@ -728,6 +729,85 @@ class Trainer(TrainerBase):
 
             # save config
             config.save(self.cf, mini_epoch)
+
+            # Save dynamic channel weights (if any loss module maintains them).
+            # We'll save two normalized variants per stream:
+            #  - mean_normalized: weights returned by `get_weights()` (mean == 1.0)
+            #  - sum_normalized: weights normalized to sum == 1.0 (probability-style)
+            try:
+                mean_norm_map = {}
+                sum_norm_map = {}
+
+                # loss_calculators structure: loss_term_name -> [(weight, calculator), ...]
+                if hasattr(self, "loss_calculator") and self.loss_calculator is not None:
+                    for calc_list in self.loss_calculator.loss_calculators.values():
+                        for _, calc in calc_list:
+                            dyn = getattr(calc, "dynamic_loss_ema", None)
+                            if dyn is None or not getattr(dyn, "enabled", False):
+                                continue
+
+                            for stream_name, ema_tensor in dyn.channel_weights_ema.items():
+                                try:
+                                    # Obtain stream info to map channel names
+                                    stream_info = self.cf.streams.get(stream_name, {})
+                                    if hasattr(stream_info, "train_target_channels"):
+                                        channel_names = list(stream_info.train_target_channels)
+                                    else:
+                                        channel_names = list(stream_info.get("train_target_channels", []))
+
+                                    # Get mean-normalized weights via helper (returns tensor mean==1)
+                                    weights_mean_norm = dyn.get_weights(stream_name, None)
+                                    if weights_mean_norm is None:
+                                        continue
+
+                                    # Ensure CPU tensor and convert to floats
+                                    w_mean_cpu = weights_mean_norm.cpu().detach()
+                                    w_sum_cpu = (w_mean_cpu / w_mean_cpu.sum()).detach()
+
+                                    # Build name->value maps
+                                    mean_norm_map[stream_name] = {
+                                        ch: float(w_mean_cpu[i].item())
+                                        for i, ch in enumerate(channel_names)
+                                    }
+                                    sum_norm_map[stream_name] = {
+                                        ch: float(w_sum_cpu[i].item())
+                                        for i, ch in enumerate(channel_names)
+                                    }
+                                except Exception:
+                                    logger.exception(
+                                        "Failed to build normalized weights for stream %s",
+                                        stream_name,
+                                    )
+
+                if len(mean_norm_map) > 0:
+                    cw_file = base_path / (filename + "_channel_weights.json")
+                    out = {
+                        "raw_ema": {},
+                        "mean_normalized": mean_norm_map,
+                        "sum_normalized": sum_norm_map,
+                    }
+
+                    # collect raw EMA values per stream as floats
+                    try:
+                        if hasattr(self, "loss_calculator") and self.loss_calculator is not None:
+                            for calc_list in self.loss_calculator.loss_calculators.values():
+                                for _, calc in calc_list:
+                                    dyn = getattr(calc, "dynamic_loss_ema", None)
+                                    if dyn is None or not getattr(dyn, "enabled", False):
+                                        continue
+                                    for stream_name, ema_tensor in dyn.channel_weights_ema.items():
+                                        out["raw_ema"][stream_name] = [
+                                            float(x) for x in ema_tensor.cpu().detach().tolist()
+                                        ]
+                    except Exception:
+                        logger.exception("Failed to collect raw EMA weights")
+
+                    with open(cw_file, "w", encoding="utf-8") as fh:
+                        json.dump(out, fh, indent=2)
+                    if is_root():
+                        logger.info(f"Saved normalized channel weights to {cw_file}")
+            except Exception:  # pragma: no cover - best-effort saving should not crash training
+                logger.exception("Failed to save normalized dynamic channel weights")
 
     def _log(self, stage: Stage):
         """
