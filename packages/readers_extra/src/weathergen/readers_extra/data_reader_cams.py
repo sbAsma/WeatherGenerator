@@ -17,6 +17,9 @@ from weathergen.datasets.data_reader_base import (
     check_reader_data,
 )
 
+from weathergen.train.utils import Stage
+
+
 type DType = np.float32  # The type for the data in the datasets.
 
 epsilon = 1e-4
@@ -40,6 +43,7 @@ class DataReaderCams(DataReaderTimestep):
         tw_handler: TimeWindowHandler,
         filename: Path,
         stream_info: dict,
+        stage: Stage,
     ) -> None:
         """
         Parameters
@@ -50,19 +54,23 @@ class DataReaderCams(DataReaderTimestep):
             filename (and path) of dataset
         stream_info : dict
             Stream metadata
+        stage : Stage
+            The stage of the training process
         """
 
-        # ======= Reading the Dataset ================
-        # open groups
-        ds_surface = xr.open_zarr(
-            filename, group="surface", chunks={"time": 24}, decode_timedelta=False
-        )
-        ds_profiles = xr.open_zarr(
-            filename, group="profiles", chunks={"time": 24}, decode_timedelta=False
-        )
+        # # ======= Reading the Dataset ================
+        # # open groups
+        # ds_surface = xr.open_zarr(
+        #     filename, group="surface", chunks={"time": 24}, decode_timedelta=False
+        # )
+        # ds_profiles = xr.open_zarr(
+        #     filename, group="profiles", chunks={"time": 24}, decode_timedelta=False
+        # )
 
-        # merge along variables
-        self.ds = xr.merge([ds_surface, ds_profiles])
+        # # merge along variables
+        # self.ds = xr.merge([ds_surface, ds_profiles])
+
+        self.ds = xr.open_zarr(filename, chunks={"time": 12}, decode_timedelta=False)
 
         self.stream_info = stream_info
         # Column (variable) names and indices
@@ -114,7 +122,6 @@ class DataReaderCams(DataReaderTimestep):
             end_ds,
             self.temporal_frequency,
         )
-
         # Compute absolute start/end indices in the dataset based on time window
         self.start_idx = (tw_handler.t_start - start_ds).astype("timedelta64[ns]").astype(int)
         self.end_idx = (tw_handler.t_end - start_ds).astype("timedelta64[ns]").astype(int) + 1
