@@ -124,14 +124,8 @@ case "$1" in
   create-links)
     (
       cd "$SCRIPT_DIR" || exit 1
-      # This script creates symbolic links to the shared working directories.
-      # 1. Get the path of the private config of the cluster
-      # 2. Read the yaml and extract the path of the shared conf
-      # A new --fix flag is supported by the Python script to remove incorrect
-      # symlinks automatically; pass it after the command name below.
-      # The Python helper handles config lookup and symlink validation/creation.
-      shift  # consume the "create-links" argument and forward remaining args
-      uv run --no-project python scripts/check_symlinks.py "$@"
+      # forward all args after "create-links"
+      WEATHERGEN_PRIVATE_REPO_PATH="$PRIVATE_REPO_PATH" uv run --script scripts/check_symlinks.py "${@:2}"
     )
     ;;
   create-jupyter-kernel)
