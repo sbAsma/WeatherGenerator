@@ -150,7 +150,7 @@ case "$1" in
     (
       cd "$SCRIPT_DIR" || exit 1
       # forward all args after "create-links"
-      uv run --no-project python scripts/check_symlinks.py "${@:2}"
+      WEATHERGEN_PRIVATE_REPO_PATH="$PRIVATE_REPO_PATH" uv run --script scripts/check_symlinks.py "${@:2}"
     )
     ;;
   create-jupyter-kernel)
