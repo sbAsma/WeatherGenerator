@@ -1,7 +1,6 @@
 #!/usr/bin/env -S uv run
 # /// script
-# dependencies = [ "PyYAML", "GitPython"
-# ]
+# dependencies = [ "PyYAML" ]
 # [tool.uv]
 # exclude-newer = "2025-01-01T00:00:00Z"
 # ///
@@ -17,6 +16,7 @@
 
 import argparse
 import logging
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -28,13 +28,16 @@ logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LINK_TARGETS = ("logs", "models", "plots", "results")
+PRIVATE_REPO_PATH = Path(
+    os.environ.get("WEATHERGEN_PRIVATE_REPO_PATH", REPO_ROOT.parent / "WeatherGenerator-private")
+)
 
 
 def get_working_dir() -> Path:
     try:
         config_file = Path(
             subprocess.check_output(
-                [REPO_ROOT.parent / "WeatherGenerator-private/hpc/platform-env.py", "hpc-config"],
+                [PRIVATE_REPO_PATH / "hpc/platform-env.py", "hpc-config"],
                 text=True,
             ).strip()
         )
