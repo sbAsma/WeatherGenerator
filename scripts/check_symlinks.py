@@ -7,7 +7,8 @@
 
 """
 # This script creates symbolic links to the shared working directories.
-# 1. Get the path of the private config of the cluster
+# 1. Get the path of the private config: WEATHERGEN_PRIVATE_CONF if set
+#    (e.g. in CI), otherwise inferred from the hostname by platform-env.py
 # 2. Read the yaml and extract the path of the shared conf
 # 3. Create softlinks from the shared directory into the local repository
 #
@@ -33,14 +34,20 @@ PRIVATE_REPO_PATH = Path(
 )
 
 
+def get_private_conf() -> Path:
+    if "WEATHERGEN_PRIVATE_CONF" in os.environ:
+        return Path(os.environ["WEATHERGEN_PRIVATE_CONF"])
+    return Path(
+        subprocess.check_output(
+            [PRIVATE_REPO_PATH / "hpc/platform-env.py", "hpc-config"], text=True
+        ).strip()
+    )
+
+
 def get_working_dir() -> Path:
     try:
-        config_file = Path(
-            subprocess.check_output(
-                [PRIVATE_REPO_PATH / "hpc/platform-env.py", "hpc-config"],
-                text=True,
-            ).strip()
-        )
+        config_file = get_private_conf()
+        logger.info(f"Private config: {config_file}")
         config = yaml.safe_load(config_file.read_text())
         working_dir = Path(config["path_shared_working_dir"])
     except (subprocess.CalledProcessError, FileNotFoundError, yaml.YAMLError, KeyError) as e:
