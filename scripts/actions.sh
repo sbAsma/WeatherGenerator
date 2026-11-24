@@ -150,7 +150,10 @@ case "$1" in
     (
       cd "$SCRIPT_DIR" || exit 1
       # forward all args after "create-links"
-      WEATHERGEN_PRIVATE_REPO_PATH="$PRIVATE_REPO_PATH" uv run --script scripts/check_symlinks.py "${@:2}"
+      # Use a fresh uv cache and no active venv, because the shared cache can get corrupted.
+      # See https://github.com/ecmwf/WeatherGenerator/issues/2298
+      WEATHERGEN_PRIVATE_REPO_PATH="$PRIVATE_REPO_PATH" UV_CACHE_DIR="$(mktemp -d)" VIRTUAL_ENV="" \
+        uv run --script scripts/check_symlinks.py "${@:2}"
     )
     ;;
   create-jupyter-kernel)
